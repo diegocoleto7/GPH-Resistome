@@ -1,0 +1,644 @@
+---
+title: "01.Diet_models"
+author: "Diego Coleto"
+date: "2026-10-15"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(here)
+library(ggpubr)
+library(emmeans)
+library(patchwork)
+library(broom)
+library(vegan)
+
+dir.create(here("0.-Diet_group", "Results", "Plots"), recursive = TRUE, showWarnings = FALSE)
+```
+
+
+# Set plot themes
+
+```{r theme plot}
+diet_colors <- c(
+  "Omnivore"   = "#2864A5",
+  "Vegetarian" = "#9C3F90",
+  "Vegan"      = "#B36B32")
+```
+
+
+# Load data
+
+```{r load data}
+metadata <- read_tsv(here("Data", "Processed", "metadata.tsv"), show_col_types = FALSE) %>%
+  mutate(log10_depth = log10(reads))
+arg_metrics <- read_tsv(here("Data", "Processed", "arg_metrics.tsv"), show_col_types = FALSE)
+```
+
+# Alpha diversity models
+
+```{r alpha df}
+alpha_df <- metadata %>%
+  inner_join(arg_metrics, by = "sample_id") %>%
+  mutate(diet_group = factor(diet_group, levels = c("Omnivore",
+                                                    "Vegetarian",
+                                                    "Vegan")),
+         sex = factor(sex, levels = c("Female", "Male")))
+```
+
+Covariates used in every part of the project: sex + age + BMI + log10 sequencing depth
+(GPH_97 has no BMI and is dropped from the models).
+
+```{r set models and covariates}
+
+model_load <- lm(log_ARG_load ~ diet_group + sex + age + bmi + log10_depth, data = alpha_df)
+
+model_simpson <- lm(simpson ~ diet_group + sex + age + bmi + log10_depth, data = alpha_df)
+
+model_richness <- glm(richness ~ diet_group + sex + age + bmi + log10_depth,
+                      family = poisson(link ="log"),
+                      data = alpha_df)
+```
+
+
+```{r check dispersion}
+dispersion_richness <- sum(residuals(model_richness,
+                                     type = "pearson")^2) / df.residual(model_richness)
+cat("Dispersion for richness data is :",dispersion_richness)
+if (dispersion_richness > 1.5) {
+  cat("\nOverdispersion: refit richness with a negative binomial model")
+} else {
+  cat("\nDispersion close to 1: Poisson is adequate")
+}
+```
+# Marginal means estimation and comparison
+
+```{r estimated marginal means}
+
+estimate_load <- emmeans(model_load, ~ diet_group) %>%
+  confint(level = 0.95) %>%
+  as.data.frame() %>%
+  transmute(diet_group,
+            estimate = emmean,
+            conf_low = lower.CL,
+            conf_high = upper.CL)
+
+
+estimate_simpson <- emmeans(model_simpson, ~ diet_group) %>%
+  confint(level = 0.95) %>%
+  as.data.frame() %>%
+  transmute(diet_group,
+            estimate = emmean,
+            conf_low = lower.CL,
+            conf_high = upper.CL)
+
+
+estimate_richness <- emmeans(model_richness, ~ diet_group,
+                             type = "response") %>%
+  confint(level = 0.95) %>%
+  as.data.frame() %>%
+  transmute(diet_group,
+            estimate = rate,
+            conf_low = asymp.LCL,
+            conf_high = asymp.UCL)
+```
+
+```{r estimation results}
+cat("\nMean estimation for load:\n")
+print(estimate_load)
+cat("\nMean estimation for simpson:\n")
+print(estimate_simpson)
+cat("\nMean estimation for richness:\n")
+print(estimate_richness)
+```
+
+Contrasts carry Tukey-adjusted p-values and 95 % confidence intervals (`summary(infer = TRUE)`), on the link
+scale for load and Simpson and as ratios for richness.
+
+```{r mean comparison}
+
+comparison_load <- emmeans(model_load,
+                           pairwise ~ diet_group,
+                           type = "link",
+                           adjust = "tukey")$contrasts %>%
+  summary(infer = TRUE) %>%
+  as.data.frame() %>%
+  rename(conf_low = lower.CL, conf_high = upper.CL) %>%
+  separate(contrast,
+           into = c("group1", "group2"),
+           sep = " - ") %>%
+  mutate(p.adj = p.value,
+         p.signif = case_when(p.adj < 0.001 ~ "***",
+                              p.adj < 0.01 ~ "**",
+                              p.adj < 0.05 ~ "*",
+                              TRUE ~ "ns"),
+         y.position = max(estimate_load$conf_high) + 0.052 * row_number())
+
+
+comparison_simpson <- emmeans(model_simpson,
+                           pairwise ~ diet_group,
+                           type = "link",
+                           adjust = "tukey",)$contrasts %>%
+  summary(infer = TRUE) %>%
+  as.data.frame() %>%
+  rename(conf_low = lower.CL, conf_high = upper.CL) %>%
+  separate(contrast,
+           into = c("group1", "group2"),
+           sep = " - ") %>%
+  mutate(p.adj = p.value,
+         p.signif = case_when(p.adj < 0.001 ~ "***",
+                              p.adj < 0.01 ~ "**",
+                              p.adj < 0.05 ~ "*",
+                              TRUE ~ "ns"),
+         y.position = max(estimate_simpson$conf_high) + 0.009 * row_number())
+
+
+
+comparison_richness <- emmeans(model_richness,
+                           pairwise ~ diet_group,
+                           type = "response",
+                           adjust = "tukey",)$contrasts %>%
+  summary(infer = TRUE) %>%
+  as.data.frame() %>%
+  rename(conf_low = asymp.LCL, conf_high = asymp.UCL) %>%
+  separate(contrast,
+           into = c("group1", "group2"),
+           sep = " / ") %>%
+  mutate(p.adj = p.value,
+         p.signif = case_when(p.adj < 0.001 ~ "***",
+                              p.adj < 0.01 ~ "**",
+                              p.adj < 0.05 ~ "*",
+                              TRUE ~ "ns"),
+         y.position = max(estimate_richness$conf_high) + 0.052 * row_number())
+```
+
+```{r}
+cat("\nMean comparison for load:\n")
+print(comparison_load %>% select(-y.position)) 
+cat("\nMean comparison for simpson:\n")
+print(comparison_simpson %>% select(-y.position))
+cat("\nMean comparison for richness:\n")
+print(comparison_richness %>% select(-y.position))
+cat("\n p-values adjusted by tukey\n")
+
+```
+
+# Depth: rarefied richness and the accumulation curve
+
+ARG richness is the only outcome that depends on sequencing depth (Spearman 0.32 against reads). Depth spans
+13.5 to 99 M read pairs and its median differs between diet groups (Kruskal below), so the diet contrast is
+repeated on `richness_rarefied` (hit table thinned to the shallowest sample, `Data/Scripts/03`), which carries
+no depth term. The accumulation curve shows how far from saturation the libraries are.
+
+```{r depth}
+cat("Sequencing depth by diet group (Kruskal p =",
+    signif(kruskal.test(reads ~ diet_group, alpha_df)$p.value, 3), "):\n")
+alpha_df %>%
+  group_by(diet_group) %>%
+  summarise(n = n(), median_M = median(reads) / 1e6, min_M = min(reads) / 1e6, max_M = max(reads) / 1e6)
+
+cat("\nSpearman richness vs depth:", round(cor(alpha_df$richness, alpha_df$reads, method = "spearman"), 3),
+    "| rarefied richness vs depth:",
+    round(cor(alpha_df$richness_rarefied, alpha_df$reads, method = "spearman"), 3), "\n")
+
+alpha_df <- alpha_df %>% mutate(richness_rarefied_int = round(richness_rarefied))
+model_richness_rarefied <- glm(richness_rarefied_int ~ diet_group + sex + age + bmi,
+                               family = poisson(link = "log"), data = alpha_df)
+
+comparison_richness_rarefied <- emmeans(model_richness_rarefied, pairwise ~ diet_group,
+                                        type = "response", adjust = "tukey")$contrasts %>%
+  summary(infer = TRUE) %>%
+  as.data.frame() %>%
+  separate(contrast, into = c("group1", "group2"), sep = " / ") %>%
+  transmute(outcome = "ARG richness (rarefied)", group1, group2, estimate = ratio, SE,
+            conf_low = asymp.LCL, conf_high = asymp.UCL, p.adj = p.value)
+
+bind_rows(comparison_richness %>%
+            transmute(outcome = "ARG richness (observed)", group1, group2, estimate = ratio, SE,
+                      conf_low, conf_high, p.adj),
+          comparison_richness_rarefied)
+```
+
+```{r accumulation curve, fig.width = 6, fig.height = 4.5}
+cpm_gene <- read_tsv(here("Data", "Processed", "cpm_gene_GPH.tsv"), show_col_types = FALSE)
+hits_matrix <- cpm_gene %>%
+  pivot_longer(-gene_family, names_to = "sample_id", values_to = "cpm") %>%
+  left_join(alpha_df %>% select(sample_id, reads, diet_group), by = "sample_id") %>%
+  filter(!is.na(reads)) %>%
+  mutate(hits = round(cpm * reads / 1e6))
+
+set.seed(1)
+depths <- c(2, 4, 6, 8, 10, 13.5) * 1e6
+accumulation <- map_dfr(depths, function(target) {
+  hits_matrix %>%
+    filter(reads >= target) %>%
+    mutate(kept = rbinom(n(), hits, target / reads)) %>%
+    group_by(sample_id, diet_group) %>%
+    summarise(richness = sum(kept > 0), .groups = "drop") %>%
+    mutate(depth = target)
+})
+
+plot_accumulation <- accumulation %>%
+  group_by(diet_group, depth) %>%
+  summarise(mean_richness = mean(richness),
+            se = sd(richness) / sqrt(n()), .groups = "drop") %>%
+  ggplot(aes(x = depth / 1e6, y = mean_richness, colour = diet_group, fill = diet_group)) +
+  geom_ribbon(aes(ymin = mean_richness - se, ymax = mean_richness + se), alpha = 0.2, colour = NA) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 1.8) +
+  scale_colour_manual(values = diet_colors, name = NULL) +
+  scale_fill_manual(values = diet_colors, guide = "none") +
+  labs(x = "Read pairs subsampled (millions)", y = "ARG genes detected",
+       title = "ARG accumulation with sequencing depth",
+       subtitle = "Mean with standard error; all 166 samples exceed 13.5 M") +
+  theme_classic(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "bottom")
+
+plot_accumulation
+```
+
+
+# WHO critically important antimicrobials
+
+The ARG metrics above count every ResFinder gene equally. This asks the same question for the gene families
+that confer resistance to antimicrobials the WHO 2024 list places in its top tiers: CIA, HPCIA or authorized for
+human use only ("WHO-critical"). HIA and IA are medically important too but are not counted here. "Highest
+priority" in the column names means HPCIA or human use only; it is not a WHO category of its own.
+Classification from `Data/Scripts/06`, with the same covariates as the main models.
+
+```{r who critical}
+who <- read_tsv(here("Data", "Processed", "arg_who_classification.tsv"), show_col_types = FALSE) %>%
+  distinct(gene_family, who_critical = family_who_critical, who_highest_priority = family_who_highest_priority)
+
+who_cpm <- cpm_gene %>%
+  pivot_longer(-gene_family, names_to = "sample_id", values_to = "cpm") %>%
+  inner_join(who, by = "gene_family") %>%
+  group_by(sample_id) %>%
+  summarise(critical_cpm = sum(cpm[who_critical]),
+            critical_richness = sum(cpm > 0 & who_critical),
+            highest_cpm = sum(cpm[who_highest_priority]),
+            highest_richness = sum(cpm > 0 & who_highest_priority),
+            .groups = "drop")
+
+cat("Gene families classified:", nrow(who), "| WHO-critical:", sum(who$who_critical),
+    "| highest priority:", sum(who$who_highest_priority), "\n")
+
+who_df <- alpha_df %>% inner_join(who_cpm, by = "sample_id")
+who_df %>%
+  group_by(diet_group) %>%
+  summarise(across(c(critical_cpm, critical_richness, highest_cpm, highest_richness), median))
+
+who_outcomes <- tribble(
+  ~outcome,            ~label,                          ~family,
+  "critical_cpm",      "WHO-critical ARG load",         "gaussian",
+  "critical_richness", "WHO-critical ARG richness",     "poisson",
+  "highest_cpm",       "Highest-priority ARG load",     "gaussian",
+  "highest_richness",  "Highest-priority ARG richness", "poisson")
+
+fit_subset_models <- function(outcomes, data) {
+  pmap(outcomes, function(outcome, label, family) {
+    d <- data %>% mutate(y = if (family == "gaussian") log(.data[[outcome]] + 1) else .data[[outcome]])
+    fit <- glm(y ~ diet_group + sex + age + bmi + log10_depth, data = d,
+               family = if (family == "gaussian") gaussian() else poisson(link = "log"))
+    contrasts <- emmeans(fit, pairwise ~ diet_group, type = if (family == "gaussian") "link" else "response",
+                         adjust = "tukey")$contrasts %>%
+      summary(infer = TRUE) %>%
+      as.data.frame() %>%
+      transmute(outcome = label, contrast,
+                estimate = if ("ratio" %in% names(.)) ratio else estimate,
+                SE,
+                conf_low = if ("asymp.LCL" %in% names(.)) asymp.LCL else lower.CL,
+                conf_high = if ("asymp.UCL" %in% names(.)) asymp.UCL else upper.CL,
+                p_adj = p.value)
+    list(contrasts = contrasts, fit = fit, label = label)
+  })
+}
+
+who_fits <- fit_subset_models(who_outcomes, who_df)
+who_critical_by_diet <- map_dfr(who_fits, "contrasts") %>% as_tibble()
+
+who_critical_by_diet %>% mutate(across(where(is.numeric), ~ signif(.x, 3))) %>% print(n = Inf)
+```
+
+# MASTER CIA gene list (complementary classification)
+
+The same models on the gene families of the CIA gene list used for the food-production resistome (MASTER,
+Quijada et al. 2025; mapping in `Data/Scripts/06`). The list omits aminoglycoside, fosfomycin and rifampicin genes,
+so it is a narrower set than WHO-critical, and it defines no highest-priority subset.
+
+```{r master cia}
+master <- read_tsv(here("Data", "Processed", "arg_family_master_cia.tsv"), show_col_types = FALSE) %>%
+  select(gene_family, master_cia = family_master_cia)
+
+master_cpm <- cpm_gene %>%
+  pivot_longer(-gene_family, names_to = "sample_id", values_to = "cpm") %>%
+  inner_join(master, by = "gene_family") %>%
+  group_by(sample_id) %>%
+  summarise(master_cia_cpm = sum(cpm[master_cia]),
+            master_cia_richness = sum(cpm > 0 & master_cia),
+            .groups = "drop")
+
+cat("Detected gene families on the MASTER CIA list:",
+    sum(master$master_cia[master$gene_family %in% cpm_gene$gene_family]), "of", nrow(cpm_gene), "\n")
+
+master_df <- alpha_df %>% inner_join(master_cpm, by = "sample_id")
+master_outcomes <- tribble(
+  ~outcome,              ~label,                        ~family,
+  "master_cia_cpm",      "MASTER CIA ARG load",         "gaussian",
+  "master_cia_richness", "MASTER CIA ARG richness",     "poisson")
+
+master_fits <- fit_subset_models(master_outcomes, master_df)
+master_cia_by_diet <- map_dfr(master_fits, "contrasts") %>% as_tibble()
+master_cia_by_diet %>% mutate(across(where(is.numeric), ~ signif(.x, 3))) %>% print(n = Inf)
+```
+
+# Model diagnostics and descriptive summaries
+
+Dispersion of every Poisson model (Pearson χ² / residual df) and the residual standard deviation of the Gaussian
+ones, stored so that the choice of family can be checked against its model. Poisson is kept only below 1.5, the
+rule of the dispersion check above; the message below flags any model above it.
+
+```{r diagnostics}
+pearson_dispersion <- function(fit) sum(residuals(fit, type = "pearson")^2) / df.residual(fit)
+
+model_diagnostics <- bind_rows(
+  tibble(outcome = "log ARG load", family = "gaussian", fit = list(model_load)),
+  tibble(outcome = "ARG Simpson", family = "gaussian", fit = list(model_simpson)),
+  tibble(outcome = "ARG richness", family = "poisson", fit = list(model_richness)),
+  tibble(outcome = "ARG richness (rarefied)", family = "poisson", fit = list(model_richness_rarefied)),
+  tibble(outcome = map_chr(c(who_fits, master_fits), "label"),
+         family = c(who_outcomes$family, master_outcomes$family),
+         fit = map(c(who_fits, master_fits), "fit"))) %>%
+  mutate(n = map_int(fit, nobs),
+         df_residual = map_int(fit, df.residual),
+         pearson_dispersion = map2_dbl(fit, family, ~ if (.y == "poisson") pearson_dispersion(.x) else NA_real_),
+         residual_sd = map2_dbl(fit, family, ~ if (.y == "gaussian") sigma(.x) else NA_real_)) %>%
+  select(-fit)
+model_diagnostics
+over <- model_diagnostics %>% filter(pearson_dispersion > 1.5)
+if (nrow(over) > 0) message("Poisson models with dispersion above 1.5: ", paste(over$outcome, collapse = ", "))
+
+depth_correlation <- tibble(
+  measure = c("ARG richness (observed)", "ARG richness (rarefied)"),
+  spearman_rho = c(cor(alpha_df$richness, alpha_df$reads, method = "spearman"),
+                   cor(alpha_df$richness_rarefied, alpha_df$reads, method = "spearman")),
+  n = nrow(alpha_df),
+  depth_kruskal_p = kruskal.test(reads ~ diet_group, alpha_df)$p.value)
+depth_correlation
+
+# Cohort and resistome summaries on all 166 participants (GPH_97 counts here; it has no BMI)
+summarise_cohort <- function(d) {
+  summarise(d, n = n(), n_women = sum(sex == "Female"), pct_women = mean(sex == "Female") * 100,
+            age_median = median(age), age_min = min(age), age_max = max(age),
+            bmi_median = median(bmi, na.rm = TRUE), n_bmi_missing = sum(is.na(bmi)),
+            depth_median_M = median(reads) / 1e6, depth_min_M = min(reads) / 1e6, depth_max_M = max(reads) / 1e6,
+            richness_median = median(richness), richness_min = min(richness), richness_max = max(richness))
+}
+cohort_summary <- bind_rows(alpha_df %>% summarise_cohort() %>% mutate(diet_group = "All"),
+                            alpha_df %>% group_by(diet_group) %>% summarise_cohort() %>%
+                              mutate(diet_group = as.character(diet_group))) %>%
+  relocate(diet_group)
+cohort_summary
+
+who_all <- read_tsv(here("Data", "Processed", "arg_who_classification.tsv"), show_col_types = FALSE)
+resistome_summary <- tibble(
+  families_in_database = n_distinct(who_all$gene_family),
+  families_detected = nrow(cpm_gene),
+  families_detected_who_critical = sum(who$who_critical[who$gene_family %in% cpm_gene$gene_family]),
+  families_detected_master_cia = sum(master$master_cia[master$gene_family %in% cpm_gene$gene_family]))
+resistome_summary
+```
+
+
+```{r save tables}
+dir.create(here("0.-Diet_group", "Results", "Tables"), recursive = TRUE, showWarnings = FALSE)
+write_tsv(comparison_richness_rarefied, here("0.-Diet_group", "Results", "Tables", "diet_richness_rarefied.tsv"))
+write_tsv(accumulation, here("0.-Diet_group", "Results", "Tables", "arg_accumulation_curve.tsv"))
+write_tsv(who_critical_by_diet, here("0.-Diet_group", "Results", "Tables", "who_critical_by_diet.tsv"))
+write_tsv(who_df %>% select(sample_id, diet_group, critical_cpm, critical_richness, highest_cpm, highest_richness),
+          here("0.-Diet_group", "Results", "Tables", "who_critical_by_sample.tsv"))
+write_tsv(master_cia_by_diet, here("0.-Diet_group", "Results", "Tables", "master_cia_by_diet.tsv"))
+write_tsv(master_df %>% select(sample_id, diet_group, master_cia_cpm, master_cia_richness),
+          here("0.-Diet_group", "Results", "Tables", "master_cia_by_sample.tsv"))
+write_tsv(model_diagnostics, here("0.-Diet_group", "Results", "Tables", "diet_model_diagnostics.tsv"))
+write_tsv(depth_correlation, here("0.-Diet_group", "Results", "Tables", "depth_correlation.tsv"))
+write_tsv(cohort_summary, here("0.-Diet_group", "Results", "Tables", "cohort_summary.tsv"))
+write_tsv(resistome_summary, here("0.-Diet_group", "Results", "Tables", "resistome_summary.tsv"))
+ggsave(here("0.-Diet_group", "Results", "Plots", "ARG_accumulation_curve.png"), plot_accumulation,
+       width = 6, height = 4.5, dpi = 600, bg = "white")
+
+bind_rows(estimate_load %>% mutate(outcome = "log ARG load"),
+          estimate_richness %>% mutate(outcome = "ARG richness"),
+          estimate_simpson %>% mutate(outcome = "ARG Simpson")) %>%
+  relocate(outcome) %>%
+  write_tsv(here("0.-Diet_group", "Results", "Tables", "diet_marginal_means.tsv"))
+
+bind_rows(comparison_load %>% mutate(outcome = "log ARG load"),
+          comparison_richness %>% rename(estimate = ratio) %>% mutate(outcome = "ARG richness"),
+          comparison_simpson %>% mutate(outcome = "ARG Simpson")) %>%
+  select(outcome, group1, group2, estimate, SE, conf_low, conf_high, p.adj, p.signif) %>%
+  write_tsv(here("0.-Diet_group", "Results", "Tables", "diet_comparisons.tsv"))
+```
+
+# Plot means
+
+```{r p-value position funtion}
+set_relative_pvalue_positions <- function(comparison_df,
+                                          estimate_df,
+                                          lower_padding = 0.50,
+                                          bracket_start = 0.12,
+                                          bracket_step = 0.10,
+                                          upper_padding = 0.08) {
+  data_min <- min(estimate_df$conf_low, na.rm = TRUE)
+
+  data_max <- max(estimate_df$conf_high, na.rm = TRUE)
+
+  data_range <- data_max - data_min
+
+  if (!is.finite(data_range) || data_range == 0) {
+    data_range <- abs(data_max) * 0.1
+    if (data_range == 0) {
+      data_range <- 1}}
+
+  comparison_df <- comparison_df %>%
+    mutate(y.position =data_max +
+             data_range * bracket_start +
+             data_range * bracket_step * (row_number() - 1))
+
+  y_lower <- data_min - data_range * lower_padding
+
+  y_upper <- max(comparison_df$y.position,
+                 na.rm = TRUE) + data_range * upper_padding
+
+  list(comparison = comparison_df,
+    limits = c(y_lower, y_upper))}
+```
+
+
+```{r p-value positions}
+load_positions <- set_relative_pvalue_positions(
+  comparison_df = comparison_load,
+  estimate_df = estimate_load
+)
+
+simpson_positions <- set_relative_pvalue_positions(
+  comparison_df = comparison_simpson,
+  estimate_df = estimate_simpson
+)
+
+richness_positions <- set_relative_pvalue_positions(
+  comparison_df = comparison_richness,
+  estimate_df = estimate_richness
+)
+
+comparison_load <- load_positions$comparison
+comparison_simpson <- simpson_positions$comparison
+comparison_richness <- richness_positions$comparison
+```
+
+
+```{r plot load, echo=FALSE, warning=FALSE}
+plot_object_load <- ggplot(estimate_load, aes(x = diet_group,
+                                              y = estimate,
+                                              colour = diet_group)) +
+  geom_errorbar(aes(ymin = conf_low,
+                    ymax = conf_high),
+                width = 0.12,
+                linewidth = 0.9) +
+  geom_point(size = 3) +
+  scale_colour_manual(
+    values = diet_colors,
+    guide = "none") +
+  stat_pvalue_manual(comparison_load,
+                     xmin = "group1",
+                     xmax = "group2",
+                     y.position = "y.position",
+                     label = "p.signif",
+                     bracket.size = 0.8,
+                     tip.length = 0.01,
+                     size = 4) +
+  coord_cartesian(ylim = load_positions$limits,
+                  clip = "off") +
+  labs(title = "ARG load",
+       x = NULL,
+       y = "log(CPM)") +
+  theme_classic(base_size = 10) +
+  theme(plot.title = element_text(size = 11,
+                                  face = "bold"),
+    axis.text.x = element_text(face = "bold",
+                               colour = unname(diet_colors),
+                               size = 9),
+    axis.title.y = element_text(face = "bold",
+                                size = 9),
+    axis.line = element_line(linewidth = 0.5),
+    axis.ticks = element_line(linewidth = 0.5),
+    plot.margin = margin(
+      t = 8,
+      r = 5,
+      b = 5,
+      l = 5))
+plot_object_load
+```
+
+
+```{r plot simpson, echo=FALSE, warning=FALSE}
+plot_object_simpson <- ggplot(estimate_simpson, aes(x = diet_group,
+                                                    y = estimate,
+                                                    colour = diet_group)) +
+  geom_errorbar(aes(ymin = conf_low,
+                    ymax = conf_high),
+                width = 0.12,
+                linewidth = 0.9) +
+  geom_point(size = 3) +
+  scale_colour_manual(values = diet_colors,
+                      guide = "none") +
+  stat_pvalue_manual(comparison_simpson,
+                     xmin = "group1",
+                     xmax = "group2",
+                     y.position = "y.position",
+                     label = "p.signif",
+                     bracket.size = 0.8,
+                     tip.length = 0.01,
+                     size = 4) +
+  coord_cartesian(ylim = simpson_positions$limits,
+                  clip = "off") +
+  labs(title = "ARG Simpson diversity",
+       x = NULL,
+       y = "Simpson index") +
+  theme_classic(base_size = 10) +
+  theme(plot.title = element_text(size = 11,
+                                  face = "bold"),
+    axis.text.x = element_text(face = "bold",
+                               colour = unname(diet_colors),
+                               size = 9),
+    axis.title.y = element_text(face = "bold",
+                                size = 9),
+    axis.line = element_line(linewidth = 0.5),
+    axis.ticks = element_line(linewidth = 0.5),
+    plot.margin = margin(
+      t = 8,
+      r = 5,
+      b = 5,
+      l = 5))
+plot_object_simpson
+```
+
+```{r plot richness, echo=FALSE, warning=FALSE}
+plot_object_richness <- ggplot(estimate_richness,aes(x = diet_group,
+                                                     y = estimate,
+                                                     colour = diet_group)) +
+  geom_errorbar(aes(ymin = conf_low,
+                    ymax = conf_high),
+                width = 0.12,
+                linewidth = 0.9) +
+  geom_point(size = 3) +
+  scale_colour_manual(values = diet_colors,
+                      guide = "none") +
+  stat_pvalue_manual(comparison_richness,
+                     xmin = "group1",
+                     xmax = "group2",
+                     y.position = "y.position",
+                     label = "p.signif",
+                     bracket.size = 0.8,
+                     tip.length = 0.01,
+                     size = 4) +
+  coord_cartesian(ylim = richness_positions$limits,
+                  clip = "off") +
+  labs(title = "ARG Richness",
+       x = NULL,
+       y = "Richness") +
+  theme_classic(base_size = 10) +
+  theme(plot.title = element_text(size = 11,
+                                  face = "bold"),
+    axis.text.x = element_text(face = "bold",
+                               colour = unname(diet_colors),
+                               size = 9),
+    axis.title.y = element_text(face = "bold",
+                                size = 9),
+    axis.line = element_line(linewidth = 0.5),
+    axis.ticks = element_line(linewidth = 0.5))
+plot_object_richness
+```
+
+```{r final plot, echo=FALSE, warning=FALSE}
+plot_alpha <- (
+  plot_object_load |
+  plot_object_richness |
+  plot_object_simpson
+) +
+  plot_layout(
+    widths = c(1, 1, 1)
+  )
+plot_alpha
+```
+
+```{r save plot}
+ggsave(here("0.-Diet_group", "Results", "Plots", "model_estimation_means.png"), plot_alpha, height = 5, width = 10,
+       dpi = 600, bg = "white")
+```

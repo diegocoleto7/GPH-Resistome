@@ -1,0 +1,104 @@
+---
+title: "07.Assembly_stats"
+author: "Diego Coleto"
+date: "2026-10-20"
+output: html_document
+---
+
+Assembly statistics and contig coverage (MEGAHIT assemblies, contigs ≥ 1 kb).
+
+* `assembly_stats.tsv` (raw): `seqkit stats -a -T *.contigs.fa`.
+* `contig_headers.tsv` (raw): MEGAHIT FASTA headers, `sample<TAB>contig flag=.. multi=.. len=..`;
+  `multi` is the average k-mer coverage of the contig, used as its sequencing depth.
+
+Outputs (`Data/Processed`)
+
+* `assembly_stats.tsv`: one row per sample (contigs, assembled Mb, N50, coverage-weighted assembled Mb).
+* `contig_coverage.tsv`: coverage and length of the ARG-carrying contigs.
+
+Coverage-weighted assembled Mb = Σ(coverage × length) / 1e6 over all contigs of a sample; it is used to express
+ARG-contig abundances relative to the whole assembly (as reads per million in the read-based CPM).
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(here)
+library(data.table)
+```
+
+# Load data
+
+```{r load data}
+seqkit <- read_tsv(here("Data", "Raw", "Assembly", "assembly_stats.tsv"), show_col_types = FALSE)
+metadata <- read_tsv(here("Data", "Processed", "metadata.tsv"), show_col_types = FALSE)
+contig_master <- read_tsv(here("Data", "Processed", "contig_master.tsv"), show_col_types = FALSE)
+
+headers <- fread(here("Data", "Raw", "Assembly", "contig_headers.tsv"), sep = "\t", header = FALSE,
+                 col.names = c("sample_id", "header"), showProgress = FALSE)
+```
+
+# Parse contig headers
+
+```{r parse headers}
+headers <- as_tibble(headers) %>%
+  # The first line of the raw file carries terminal control characters before the sample name
+  mutate(sample_id = str_extract(sample_id, "GPH_\\d+"),
+         contig_id = str_extract(header, "^\\S+"),
+         coverage = as.numeric(str_match(header, "multi=([0-9.]+)")[, 2]),
+         contig_length = as.integer(str_match(header, "len=(\\d+)")[, 2])) %>%
+  select(-header)
+
+stopifnot(!anyNA(headers))
+cat("Contigs:", nrow(headers), "| samples:", n_distinct(headers$sample_id), "\n")
+```
+
+# Assembly statistics
+
+```{r assembly stats}
+coverage_stats <- headers %>%
+  group_by(sample_id) %>%
+  summarise(n_contigs = n(),
+            assembly_Mb_headers = sum(contig_length) / 1e6,
+            coverage_weighted_Mb = sum(coverage * contig_length) / 1e6,
+            median_coverage = median(coverage),
+            .groups = "drop")
+
+assembly_stats <- seqkit %>%
+  transmute(sample_id = str_remove(basename(file), "\\.contigs\\.fa.*$"),
+            assembly_Mb = sum_len / 1e6,
+            N50,
+            max_contig_kb = max_len / 1e3) %>%
+  inner_join(coverage_stats, by = "sample_id") %>%
+  filter(sample_id %in% metadata$sample_id)
+
+# seqkit and headers must describe the same assemblies
+stopifnot(isTRUE(all.equal(assembly_stats$assembly_Mb, assembly_stats$assembly_Mb_headers)))
+assembly_stats <- assembly_stats %>% select(-assembly_Mb_headers)
+
+cat("Samples:", nrow(assembly_stats), "of", nrow(metadata), "\n")
+summary(assembly_stats %>% select(-sample_id))
+```
+
+# ARG contig coverage
+
+```{r arg contigs}
+contig_coverage <- contig_master %>%
+  distinct(sample_id, contig_id, contig_length_kraken = contig_length) %>%
+  left_join(headers, by = c("sample_id", "contig_id"))
+
+stopifnot(!anyNA(contig_coverage$coverage),
+          all(contig_coverage$contig_length == contig_coverage$contig_length_kraken))
+
+contig_coverage <- contig_coverage %>% select(sample_id, contig_id, contig_length, coverage)
+summary(contig_coverage$coverage)
+```
+
+# Save
+
+```{r save}
+write_tsv(assembly_stats, here("Data", "Processed", "assembly_stats.tsv"))
+write_tsv(contig_coverage, here("Data", "Processed", "contig_coverage.tsv"))
+```

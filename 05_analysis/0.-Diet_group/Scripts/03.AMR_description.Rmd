@@ -1,0 +1,558 @@
+---
+title: "03.AMR_description"
+author: "Diego Coleto"
+date: "2026-07-15"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(here)
+library(vegan)
+library(ggpubr)
+library(ggh4x)
+library(patchwork)
+library(Maaslin2)
+
+plot_dir <- here("0.-Diet_group", "Results", "Plots")
+maaslin_dir <- here("0.-Diet_group", "Results", "Maaslin2")
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(maaslin_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+
+# Set plot themes
+
+```{r theme}
+diet_colors <- c(
+  "Omnivore"   = "#2864A5",
+  "Vegetarian" = "#9C3F90",
+  "Vegan"      = "#B36B32")
+
+class_colors <- c(
+  "Aminoglycoside"            = "#C49135",
+  "Amphenicol"                = "#2D6A8A",
+  "Beta-lactam"               = "#0F4C81",
+  "Folate pathway antagonist" = "#5B5F97",
+  "Fosfomycin"                = "#765D9A",
+  "Glycopeptide"              = "#B5525C",
+  "Ionophores"                = "#9A648D",
+  "Lincosamide"               = "#83558A",
+  "Macrolide"                 = "#D35D90",
+  "Nitroimidazole"            = "#C46D4A",
+  "Oxazolidinone"             = "#D17A45",
+  "Phenicol"                  = "#E0A458",
+  "Pleuromutilin"             = "#4F6D9A",
+  "Polymyxin"                 = "#A98467",
+  "Pseudomonic acid"          = "#6B6D76",
+  "Quinolone"                 = "#346B5B",
+  "Rifamycin"                 = "#4C956C",
+  "Streptogramin A"           = "#7D8597",
+  "Streptogramin B"           = "#8E6B55",
+  "Tetracycline"              = "#789447")
+
+theme_set(
+  theme_minimal(base_size = 10) +
+    theme(
+      plot.title = element_text(face = "bold", size = 11),
+      plot.subtitle = element_text(size = 9, color = "grey30"),
+      plot.title.position = "plot",
+      panel.grid.minor = element_blank(),
+      legend.position = "bottom",
+      legend.title = element_blank(),
+      strip.text = element_text(face = "bold", size = 9)))
+
+```
+
+
+# Data
+
+```{r load data}
+metadata <- read_tsv(here("Data", "Processed", "metadata.tsv"), show_col_types = FALSE) %>%
+  mutate(log10_depth = log10(reads))
+cpm <- read_tsv(here("Data", "Processed", "cpm_gene_GPH.tsv"), show_col_types = FALSE) %>% rename(gene = gene_family)
+phenotypes <- read_tsv(here("Data", "Processed", "phenotypes_cluster.tsv"), show_col_types = FALSE) %>%
+  mutate(antibiotic_class = gsub("Tetracyclines", "Tetracycline", antibiotic_class))
+```
+
+
+```{r description}
+n_gene <- unique(nrow(cpm))
+n_db_genes <- length(unique(phenotypes$gene_family))
+n_db_cluster <- max(phenotypes$cluster) + 1
+n_db_cluster_genes <- n_distinct(phenotypes$gene_family)
+mean_genes <- cpm %>% column_to_rownames(var="gene") %>% t() %>% {rowSums(. > 0, na.rm=TRUE)} %>% mean()
+
+cat("Total of", n_gene, "different genes in", ncol(cpm) - 1, "samples.\n")
+cat("\tMean:", round(mean_genes)," different genes in each sample \n")
+cat("Represent", n_gene / n_db_cluster_genes * 100, "% of the total genes in clustered db.\n")
+
+```
+# Antibiotic class analysis
+
+```{r antibiotic class}
+gene_classes <- phenotypes %>%
+  select(gene_family, antibiotic_class) %>%
+  separate_longer_delim(antibiotic_class, delim = ",") %>%
+  mutate(antibiotic_class = str_trim(antibiotic_class)) %>%
+  distinct(gene_family, antibiotic_class) %>%
+  rename(gene = gene_family)
+ 
+
+cpm_class <- cpm %>%
+  pivot_longer(cols = -gene,
+               names_to = "sample_id",
+               values_to = "CPM") %>%
+  left_join(gene_classes, by = "gene",relationship = "many-to-many") %>%
+  group_by(sample_id, antibiotic_class) %>%
+  summarise(class_CPM = sum(CPM, na.rm = TRUE),
+            .groups = "drop") %>%
+  left_join(metadata %>% select(sample_id, diet_group),
+            by = "sample_id")
+```
+
+
+```{r plot class}
+plot_class_CPM <- cpm_class %>%
+  mutate(antibiotic_class = forcats::fct_reorder(antibiotic_class,
+                                                 class_CPM,
+                                                 .fun = median,
+                                                 .desc = FALSE),
+         diet_group = factor(diet_group, levels = c("Omnivore",
+                                               "Vegetarian",
+                                               "Vegan"))) %>%
+  ggplot(aes(x = antibiotic_class,
+             y = class_CPM,
+             color = antibiotic_class)) +
+  geom_boxplot(outlier.shape = NA,
+               linewidth = 0.85,
+               show.legend = FALSE) +
+  geom_jitter(aes(fill = antibiotic_class),
+              shape = 21,
+              colour = "black",
+              width = 0.18,
+              size = 1.7,
+              alpha = 0.85) +
+  facet_wrap2(~ diet_group,
+              nrow = 1,
+              strip = strip_themed(background_x = elem_list_rect(fill = c("Omnivore" = "#2864A5",
+                                                                          "Vegetarian" = "#9C3F90",
+                                                                          "Vegan" = "#B36B32"),
+                                                                 colour = "black"),
+                                   text_x = elem_list_text(colour = "black",
+                                                           face = "bold",
+                                                           size = 11))) +
+  coord_flip() +
+  scale_y_continuous(trans = scales::pseudo_log_trans(base = 10),
+                     breaks = c(0, 100, 1000, 10000),
+                     labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
+  scale_fill_manual(values = class_colors,
+                    name = "Antibiotic class") +
+  scale_color_manual(values = class_colors,
+                     guide = "none") +
+  labs(x = NULL,
+       y = "ARG CPM") +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  guides(fill = guide_legend(nrow = 2,
+                             byrow = TRUE,
+                             override.aes = list(shape = 22,
+                                                 size = 3,
+                                                 colour = "black",
+                                                 alpha = 1)))
+plot_class_CPM
+```
+
+```{r save plot 1}
+ggsave(file.path(plot_dir, "ARG_classes_by_diet_color.png"), plot_class_CPM, width = 18.9, height = 7, dpi = 600,
+       bg = "white")
+
+# CPM per antibiotic class and sample (a multi-class gene counts in each of its classes)
+dir.create(here("0.-Diet_group", "Results", "Tables"), recursive = TRUE, showWarnings = FALSE)
+write_tsv(cpm_class, here("0.-Diet_group", "Results", "Tables", "arg_class_cpm_by_sample.tsv"))
+```
+
+# Gene level anaysis
+
+```{r top 15 genes}
+cpm_gene <- cpm %>%
+  pivot_longer(cols = -gene,
+               names_to = "sample_id",
+               values_to = "gene_CPM") %>%
+  left_join(metadata %>% select(sample_id, diet_group),
+            by = "sample_id") %>%
+  group_by(sample_id, diet_group, gene) %>%
+  summarise(gene_CPM = sum(gene_CPM, na.rm = TRUE),
+            .groups = "drop") %>%
+  mutate(diet_group = factor(
+    diet_group,
+    levels = names(diet_colors)))
+
+
+top15_table <- cpm_gene %>%
+  group_by(gene) %>%
+  summarise(mean_CPM = mean(gene_CPM, na.rm = TRUE),
+            .groups = "drop") %>%
+  slice_max(order_by = mean_CPM,
+            n = 15,
+            with_ties = FALSE) %>%
+  arrange(desc(mean_CPM))
+
+top15_genes <- top15_table$gene
+gene_levels <- rev(top15_genes)
+
+
+top15_gene_data <- cpm_gene %>%
+  filter(gene %in% top15_genes) %>%
+  mutate(gene = factor(gene,
+                       levels = gene_levels))
+
+
+top15_gene_summary <- top15_gene_data %>%
+  group_by(gene, diet_group) %>%
+  summarise(n = sum(!is.na(gene_CPM)),
+            mean_CPM = mean(gene_CPM, na.rm = TRUE),
+            sd_CPM = sd(gene_CPM, na.rm = TRUE),
+            se_CPM = sd_CPM / sqrt(n),
+            t_critical = if_else(
+              n > 1,
+              qt(0.975, df = n - 1),
+              NA_real_),
+            ci_low = pmax(
+              0,
+              mean_CPM - t_critical * se_CPM),
+            ci_high = mean_CPM + t_critical * se_CPM,
+            .groups = "drop")
+
+
+
+
+plot_gene_abundance <- ggplot(top15_gene_data, aes(x = gene,
+                                                   y = gene_CPM,
+                                                   colour = diet_group)) +
+  # geom_point(position = position_jitterdodge(jitter.width = 0.12,
+  #                                            jitter.height = 0,
+  #                                            dodge.width = 0.68),
+  #            size = 1.1,
+  #            alpha = 0.22) +
+
+  geom_errorbar(data = top15_gene_summary, aes(x = gene,
+                                               ymin = ci_low,
+                                               ymax = ci_high,
+                                               colour = diet_group,
+                                               group = diet_group),
+                position = position_dodge(width = 0.68),
+                width = 0.20,
+                linewidth = 0.65,
+                inherit.aes = FALSE) +
+
+  geom_point(data = top15_gene_summary, aes(x = gene,
+                                            y = mean_CPM,
+                                            colour = diet_group,
+                                            group = diet_group),
+             position = position_dodge(width = 0.68),
+             shape = 18,
+             size = 3.2,
+             inherit.aes = FALSE) +
+  coord_flip() +
+  scale_colour_manual(values = diet_colors,
+                      drop = FALSE) +
+  scale_y_continuous(trans = scales::pseudo_log_trans(base = 10),
+                     breaks = c(0, 1, 10, 100, 1000, 10000),
+                     labels = scales::label_number(scale_cut = scales::cut_short_scale()),
+                     expand = expansion(mult = c(0.01, 0.08))) +
+
+  labs(x = NULL,
+       y = "Gene abundance (CPM)",
+       colour = "Diet group") +
+  theme_bw(base_size = 10) +
+  theme(axis.text.y = element_text(face = "bold", size = 9),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = "bottom",
+        plot.margin = margin(t = 5.5,
+                             r = 0,
+                             b = 5.5,
+                             l = 5.5)) +
+
+  guides(colour = guide_legend(order = 1,
+                               nrow = 1,
+                               override.aes = list(alpha = 1,
+                                                   size = 3)))
+
+tile_width <- 0.2
+tile_gap   <- 0.01
+tile_step  <- tile_width + tile_gap
+
+top15_gene_classes <- gene_classes %>%
+  filter(gene %in% top15_genes) %>%
+  distinct(gene, antibiotic_class) %>%
+  mutate(gene = factor(gene,
+                       levels = gene_levels),
+         antibiotic_class = factor(antibiotic_class,
+                                   levels = names(class_colors))) %>%
+  arrange(gene, antibiotic_class) %>%
+  group_by(gene) %>%
+  mutate(class_number = row_number(),
+         class_position = 1 + ((class_number - 1) * tile_width) + tile_gap) %>%
+  ungroup()
+
+
+max_class_position <- max(top15_gene_classes$class_position)
+
+plot_gene_classes <- ggplot(top15_gene_classes, aes(x = class_position,
+                                                    y = gene,
+                                                    fill = antibiotic_class)) +
+  geom_tile(width = tile_width,
+            height = 0.9,
+            colour = "white",
+            linewidth = 0.1) +
+
+  scale_fill_manual(values = class_colors,
+                    drop = TRUE) +
+
+  scale_x_continuous(limits = c(1 - tile_width / 2,
+                                max_class_position + tile_width / 2),
+                     breaks = NULL,
+                     expand = c(0, 0)) +
+  scale_y_discrete(limits = gene_levels,
+                   drop = FALSE,
+                   expand = expansion(add = 0)) +
+
+  labs(x = "ARG class",
+       y = NULL,) +
+  theme_bw(base_size = 10) +
+  theme(axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank(),
+        panel.border = element_blank(),
+        axis.title.x = element_text(face = "bold",
+                                    size = 9),
+        legend.position = "none",
+        plot.margin = margin(t = 5.5,
+                             r = 5.5,
+                             b = 5.5,
+                             l = 2))
+
+
+# Final panel
+
+plot_top15_genes <- plot_gene_abundance +
+  plot_gene_classes +
+  plot_layout(widths = c(5.5, 0.5)) +
+  theme(legend.position = "none",)
+
+
+plot_top15_genes
+```
+
+```{r save plot 2}
+ggsave(file.path(plot_dir, "ARG_genes_by_diet_color.png"), plot_top15_genes, width = 7.5, height = 5, dpi = 600,
+       bg = "white")
+```
+
+# Maaslin analysis
+
+Gene level analysis
+
+```{r gene metadata}
+# Metadata
+metadata_maaslin <- metadata %>%
+  mutate(diet_group = factor(diet_group,
+                             levels = c("Omnivore",
+                                        "Vegetarian",
+                                        "Vegan"))) %>%
+  column_to_rownames("sample_id")
+
+
+# CPM genes
+gene_maaslin <- cpm %>%
+  column_to_rownames("gene") %>%
+  t() %>%
+  as.data.frame()
+
+common_samples <- intersect(
+  rownames(gene_maaslin),
+  rownames(metadata_maaslin))
+
+gene_maaslin <- gene_maaslin[common_samples,,drop = FALSE]
+
+metadata_maaslin <- metadata_maaslin[common_samples,,drop = FALSE]
+```
+
+```{r  gene prevalence filter}
+prevalence <- colMeans(gene_maaslin > 0)
+
+gene_maaslin_filtered <- gene_maaslin[
+  ,
+  prevalence >= 0.10,
+  drop = FALSE
+]
+```
+
+```{r Maaslin2 gene-level}
+fit_gene <- Maaslin2(
+  input_data = gene_maaslin_filtered,
+  input_metadata = metadata_maaslin,
+
+  output = file.path(maaslin_dir, "Gene"),
+
+  fixed_effects = c("diet_group"),
+
+  normalization = "NONE",
+  transform = "LOG",
+
+  reference = "diet_group,Omnivore",
+
+  standardize = FALSE,
+
+  min_prevalence = 0)
+```
+
+```{r Maaslin2 gene-level adjusted}
+fit_gene <- Maaslin2(
+  input_data = gene_maaslin_filtered,
+  input_metadata = metadata_maaslin,
+
+  output = file.path(maaslin_dir, "Gene_adjusted"),
+
+  fixed_effects = c(
+    "diet_group",
+    "sex",
+    "age",
+    "bmi",
+    "log10_depth"),
+
+  normalization = "NONE",
+  transform = "LOG",
+
+  reference = "diet_group,Omnivore",
+
+  standardize = FALSE,
+  plot_scatter = FALSE,
+  plot_heatmap = FALSE
+)
+```
+
+
+Class level analysis
+
+```{r class metadata}
+class_maaslin <- cpm_class %>%
+  select(
+    sample_id,
+    antibiotic_class,
+    class_CPM
+  ) %>%
+  pivot_wider(
+    names_from = antibiotic_class,
+    values_from = class_CPM,
+    values_fill = 0
+  ) %>%
+  column_to_rownames("sample_id")
+
+common_samples <- intersect(
+  rownames(class_maaslin),
+  rownames(metadata_maaslin)
+)
+
+class_maaslin <- class_maaslin[
+  common_samples,
+  ,
+  drop = FALSE
+]
+
+metadata_class <- metadata_maaslin[
+  common_samples,
+  ,
+  drop = FALSE
+]
+```
+
+
+```{r class prevalence filter}
+class_prevalence <- tibble(
+  antibiotic_class = colnames(class_maaslin),
+  prevalence = colMeans(class_maaslin > 0)
+) %>%
+  arrange(desc(prevalence))
+
+
+keep_classes <- class_prevalence %>%
+  filter(prevalence >= 0.10) %>%
+  pull(antibiotic_class)
+
+class_maaslin_filtered <- class_maaslin[
+  ,
+  keep_classes,
+  drop = FALSE
+]
+```
+
+```{r Maaslin2 class-level adjusted}
+fit_class <- Maaslin2(
+  input_data = class_maaslin_filtered,
+  input_metadata = metadata_class,
+
+  output = file.path(maaslin_dir, "Antibiotic_class"),
+
+  fixed_effects = c(
+    "diet_group",
+    "sex",
+    "age",
+    "bmi",
+    "log10_depth"
+  ),
+
+  normalization = "NONE",
+  transform = "LOG",
+
+  reference = "diet_group,Omnivore",
+
+  standardize = FALSE,
+
+  min_prevalence = 0,
+  plot_scatter = FALSE,
+  plot_heatmap = FALSE
+)
+```
+
+# Summaries read by the manuscript
+
+The class ranking uses the median CPM across all participants, the order of the class plot above. A gene
+conferring resistance to several classes counts in each of them.
+
+MaAsLin 2 applies Benjamini-Hochberg across every feature and every fixed effect, covariates included (61 gene
+families × 6 coefficients). That is the q reported. As a sensitivity analysis the correction is repeated within the
+diet-group coefficients only (61 families × 2 contrasts); both are exported.
+
+```{r summaries}
+class_ranking <- cpm_class %>%
+  group_by(antibiotic_class) %>%
+  summarise(median_CPM = median(class_CPM), mean_CPM = mean(class_CPM),
+            prevalence = mean(class_CPM > 0), .groups = "drop") %>%
+  arrange(desc(median_CPM)) %>%
+  mutate(rank = row_number())
+class_ranking
+
+gene_adjusted <- read_tsv(file.path(maaslin_dir, "Gene_adjusted", "all_results.tsv"), show_col_types = FALSE)
+maaslin_diet_only <- gene_adjusted %>%
+  filter(metadata == "diet_group") %>%
+  mutate(q_maaslin_all_terms = qval,
+         q_diet_terms_only = p.adjust(pval, method = "BH")) %>%
+  select(feature, value, coef, stderr, pval, q_maaslin_all_terms, q_diet_terms_only) %>%
+  arrange(q_diet_terms_only)
+cat("Tests in the MaAsLin family:", nrow(gene_adjusted), "| diet-only family:", nrow(maaslin_diet_only), "\n")
+maaslin_diet_only %>% filter(q_diet_terms_only < 0.25)
+
+write_tsv(class_ranking, here("0.-Diet_group", "Results", "Tables", "arg_class_ranking.tsv"))
+write_tsv(top15_gene_summary %>% left_join(top15_table %>% rename(overall_mean_CPM = mean_CPM), by = "gene"),
+          here("0.-Diet_group", "Results", "Tables", "arg_top15_families.tsv"))
+write_tsv(maaslin_diet_only, here("0.-Diet_group", "Results", "Tables", "maaslin_gene_diet_only_bh.tsv"))
+```
+

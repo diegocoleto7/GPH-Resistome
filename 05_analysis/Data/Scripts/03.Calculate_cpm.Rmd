@@ -1,0 +1,185 @@
+---
+title: "03.Calculate_cpm"
+author: "Diego Coleto"
+date: "2026-10-28"
+output: html_document
+---
+
+Read-based resistome: ResFinder hits per sample, aggregated to gene level and normalised to CPM.
+
+**Reads are mapped against the full, unclustered ResFinder database** (`resfinder_hits_matrix_unclustered.tsv`,
+707 variants) and the hits are then summed by CD-HIT cluster. Mapping against the clustered database instead
+(one representative per cluster) forces reads from related variants onto whichever variant happens to be the
+representative, which redistributes counts between mosaic genes: comparing the two, 90.6 % of gene x sample
+cells are identical (Pearson 0.994) but tet(O/W/32/O), tet(O/W), tet(X3) and erm(T) move by factors of 0.15 to
+5.2. It also creates hits for clusters that no read actually supports: FloR, blaCTX-M-137 and blaSHV-100 were
+"detected" in 2, 1 and 3 samples with the clustered database and in none with the full one.
+
+Aggregation: each variant is assigned its **gene family** (`gene_family` in `phenotypes_cluster.tsv`, built by
+`00` from the CD-HIT 90 % clusters, with the naming rule and the manual curation documented in
+`Data/Docs/Gene_family_curation.md`) and hits are summed by family. The assignment is per variant, so the one
+curation made per variant (SHV variants split from the LEN cluster) is respected.
+
+CPM = hits x 1e6 / host-filtered read pairs.
+
+**Rarefied richness.** Sequencing depth spans 13.5 to 99 M read pairs and the median differs between diet
+groups (Kruskal p = 0.026), while ARG richness correlates with depth (rho = 0.33). Every model already carries
+log10 depth, but a single linear term assumes the accumulation curve is log-linear over a 7-fold range. So a
+depth-independent richness is also computed by **binomial thinning of the hit table** to the shallowest sample,
+averaged over 20 draws. This is the count-table equivalent of rarefaction (what `vegan::rrarefy` does) rather
+than subsampling the raw reads and re-mapping, which would need the original FASTQ files; it is a good
+approximation because ARG hits are a tiny fraction of all reads.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(here)
+library(vegan)
+
+clstr_name_length <- 19
+n_draws <- 20
+set.seed(1)
+```
+
+# Load data
+
+```{r load data}
+hits <- read_tsv(here("Data", "Raw", "Counts", "resfinder_hits_matrix_unclustered.tsv"), show_col_types = FALSE)
+metadata <- read_tsv(here("Data", "Processed", "metadata.tsv"), show_col_types = FALSE)
+clusters <- read_tsv(here("Data", "Processed", "phenotypes_cluster.tsv"), show_col_types = FALSE)
+
+stopifnot(!anyDuplicated(hits$gene),
+          !anyDuplicated(metadata$sample_id),
+          !anyNA(metadata$reads))
+
+cat("Variants mapped:", nrow(hits), "| samples:", ncol(hits) - 1, "\n")
+```
+
+
+# Sample filtering
+
+```{r sample filtering}
+sequenced_samples <- setdiff(colnames(hits), "gene")
+
+common_samples <- intersect(sequenced_samples, metadata$sample_id)
+
+cat("\nSamples sequenced:", length(sequenced_samples), "\n")
+cat("\nFFQ valid samples:", length(metadata$sample_id), "\n")
+cat("\nCommon samples:", length(common_samples), "\n")
+
+cat("\nSamples sequenced but not valid in FFQ:\n", setdiff(sequenced_samples, metadata$sample_id))
+cat("\nSamples valid in FFQ but not sequenced:\n", setdiff(metadata$sample_id, sequenced_samples))
+
+hits <- hits %>% select(gene, all_of(common_samples))
+```
+
+
+# Variant to gene family
+
+```{r hits by gene}
+variant_map <- tibble(gene = hits$gene) %>%
+  mutate(cluster_gene = str_sub(gene, 1, clstr_name_length)) %>%
+  left_join(clusters %>% distinct(cluster_gene, cluster, gene_family), by = "cluster_gene", relationship = "one-to-one")
+
+stopifnot(!anyNA(variant_map$gene_family))
+cat("Variants assigned:", nrow(variant_map), "| clusters:", n_distinct(variant_map$cluster),
+    "| gene families:", n_distinct(variant_map$gene_family), "\n")
+
+hits_gene <- hits %>%
+  mutate(gene_family = variant_map$gene_family) %>%
+  select(-gene) %>%
+  group_by(gene_family) %>%
+  summarise(across(everything(), ~ sum(.x, na.rm = TRUE)), .groups = "drop")
+
+cat("Gene families after aggregation:", nrow(hits_gene),
+    "| detected in at least one sample:", sum(rowSums(hits_gene[-1]) > 0), "\n")
+
+# How many variants collapse into each gene family
+variant_map %>%
+  count(gene_family, name = "variants") %>%
+  count(variants, name = "gene_families") %>%
+  head()
+```
+
+
+# Calculate CPM
+
+CPM = hits * 1e6 / Reads
+
+```{r CPM}
+reads <- setNames(metadata$reads, metadata$sample_id)
+
+cpm_gene <- hits_gene %>%
+  pivot_longer(-gene_family, names_to = "sample_id", values_to = "hits") %>%
+  mutate(CPM = hits * 1e6 / reads[sample_id]) %>%
+  select(-hits) %>%
+  pivot_wider(names_from = sample_id, values_from = CPM) %>%
+  filter(rowSums(across(-gene_family)) > 0)
+
+stopifnot(identical(colnames(cpm_gene)[-1], common_samples),
+          !anyNA(cpm_gene))
+```
+
+
+# Rarefied richness
+
+```{r rarefaction}
+count_matrix <- hits_gene %>%
+  select(gene_family, all_of(common_samples)) %>%
+  column_to_rownames("gene_family") %>%
+  as.matrix()
+
+rarefaction_depth <- min(reads[common_samples])
+keep_probability <- rarefaction_depth / reads[colnames(count_matrix)]
+cat("Rarefying to", round(rarefaction_depth / 1e6, 1), "M read pairs over", n_draws, "draws\n")
+
+draws <- replicate(n_draws, {
+  thinned <- matrix(rbinom(length(count_matrix), as.vector(count_matrix),
+                           rep(keep_probability, each = nrow(count_matrix))),
+                    nrow = nrow(count_matrix), dimnames = dimnames(count_matrix))
+  colSums(thinned > 0)
+})
+
+rarefied <- tibble(sample_id = colnames(count_matrix), richness_rarefied = rowMeans(draws))
+```
+
+
+# ARG metrics
+
+Shared by every analysis part:
+
+* ARG load = log(total CPM)
+* richness = number of gene families detected
+* richness_rarefied = gene families detected at a common sequencing depth
+* Simpson diversity of gene family CPMs
+
+```{r ARG metrics}
+arg_mat <- cpm_gene %>%
+  column_to_rownames("gene_family") %>%
+  t()
+
+arg_metrics <- tibble(sample_id = rownames(arg_mat),
+                      total_ARG_CPM = rowSums(arg_mat),
+                      log_ARG_load = log(total_ARG_CPM),
+                      richness = specnumber(arg_mat),
+                      simpson = diversity(arg_mat, index = "simpson")) %>%
+  left_join(rarefied, by = "sample_id")
+
+stopifnot(!anyNA(arg_metrics))
+
+arg_metrics %>%
+  summarise(across(c(total_ARG_CPM, richness, richness_rarefied, simpson), median))
+cat("Spearman richness vs depth:",
+    round(cor(arg_metrics$richness, reads[arg_metrics$sample_id], method = "spearman"), 3),
+    "| rarefied vs depth:",
+    round(cor(arg_metrics$richness_rarefied, reads[arg_metrics$sample_id], method = "spearman"), 3), "\n")
+```
+
+# Save Results
+```{r save results}
+write_tsv(cpm_gene, here("Data", "Processed", "cpm_gene_GPH.tsv"))
+write_tsv(arg_metrics, here("Data", "Processed", "arg_metrics.tsv"))
+```

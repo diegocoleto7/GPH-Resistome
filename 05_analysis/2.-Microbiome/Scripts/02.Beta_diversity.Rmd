@@ -1,0 +1,222 @@
+---
+title: "02.Beta_diversity"
+author: "Diego Coleto"
+date: "2026-10-20"
+output: html_document
+---
+
+Microbiome beta diversity by diet group (MetaPhlAn 4, species level).
+
+* Filter: species detected in ≥ 10 % of the samples; abundances re-normalised to 1 (TSS) after filtering.
+* Distances: Bray-Curtis (relative abundance), Jaccard (presence/absence) and robust Aitchison
+  (same compositional distance used for the resistome in `0.-Diet_group/02.Beta_diversity.Rmd`).
+* PERMANOVA: diet group + sex + age + BMI + log10 depth (by margin, 9999 permutations) and betadisper.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(here)
+library(phyloseq)
+library(vegan)
+
+table_dir <- here("2.-Microbiome", "Results", "Tables")
+plot_dir <- here("2.-Microbiome", "Results", "Plots")
+dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+set.seed(1)
+```
+
+
+# Set plot themes
+
+```{r theme plot}
+diet_colors <- c(
+  "Omnivore"   = "#2864A5",
+  "Vegetarian" = "#9C3F90",
+  "Vegan"      = "#B36B32")
+
+theme_set(
+  theme_minimal(base_size = 10) +
+    theme(
+      plot.title = element_text(face = "bold", size = 11),
+      plot.subtitle = element_text(size = 9, color = "grey30"),
+      plot.title.position = "plot",
+      panel.grid.minor = element_blank(),
+      legend.position = "bottom",
+      legend.title = element_blank(),
+      strip.text = element_text(face = "bold", size = 9)))
+```
+
+
+# Load data
+
+```{r load data}
+ps <- readRDS(here("Data", "Processed", "phyloseq_species.rds"))
+
+metadata <- as(sample_data(ps), "data.frame") %>%
+  rownames_to_column("sample_id") %>%
+  mutate(diet_group = factor(diet_group, levels = names(diet_colors)))
+```
+
+
+# Filter
+
+```{r filter}
+min_prevalence <- 0.10
+
+ps_beta <- ps %>%
+  filter_taxa(function(x) mean(x > 0) >= min_prevalence, prune = TRUE) %>%
+  transform_sample_counts(function(x) x / sum(x))
+
+cat("Species kept:", ntaxa(ps_beta), "of", ntaxa(ps), "\n")
+cat("Mean abundance retained per sample:",
+    round(mean(sample_sums(prune_taxa(taxa_names(ps_beta), ps)) / sample_sums(ps)) * 100, 1), "%\n")
+```
+
+
+# Functions
+
+```{r functions}
+run_pcoa <- function(distance_object, metadata_df) {
+
+  pcoa <- ordinate(ps_beta, method = "PCoA", distance = distance_object)
+
+  points <- as.data.frame(pcoa$vectors[metadata_df$sample_id, 1:2])
+  colnames(points) <- c("PC1", "PC2")
+
+  list(pcoa = pcoa,
+       points = bind_cols(metadata_df, points),
+       var_exp = pcoa$values$Relative_eig)}
+
+# Complete cases only (GPH_97 has no BMI), so PERMANOVA and betadisper use the same samples
+complete_cases <- function(distance_object, metadata_df) {
+  model_df <- metadata_df %>%
+    filter(if_all(c(diet_group, sex, age, bmi, log10_depth), ~ !is.na(.x)))
+  list(model_df = model_df,
+       distance = as.dist(as.matrix(distance_object)[model_df$sample_id, model_df$sample_id]))}
+
+# PERMANOVA with the project covariates
+run_adonis <- function(distance_object, metadata_df) {
+  cc <- complete_cases(distance_object, metadata_df)
+
+  adonis2(
+    cc$distance ~ diet_group + sex + age + bmi + log10_depth,
+    data = cc$model_df,
+    permutations = 9999,
+    by = "margin")}
+
+run_betadisper <- function(distance_object, metadata_df) {
+  cc <- complete_cases(distance_object, metadata_df)
+  permutest(betadisper(cc$distance, cc$model_df$diet_group, type = "median", bias.adjust = TRUE),
+            permutations = 9999)}
+```
+
+
+# Distances
+
+```{r distances}
+otu_beta <- t(as(otu_table(ps_beta), "matrix"))
+
+distances <- list(
+  Bray_Curtis = phyloseq::distance(ps_beta, method = "bray"),
+  Jaccard     = phyloseq::distance(ps_beta, method = "jaccard", binary = TRUE),
+  Aitchison   = vegdist(otu_beta, method = "robust.aitchison"))
+```
+
+```{r ordination and tests}
+pcoa_results <- map(distances, run_pcoa, metadata_df = metadata)
+adonis_results_list <- map(distances, run_adonis, metadata_df = metadata)
+betadisper_list <- map(distances, run_betadisper, metadata_df = metadata)
+```
+
+```{r adonis results}
+adonis_results <- imap_dfr(adonis_results_list, ~ as.data.frame(.x) %>%
+                             rownames_to_column("term") %>%
+                             mutate(analysis = .y))
+
+print(adonis_results)
+```
+
+```{r betadisper results}
+betadisper_results <- imap_dfr(betadisper_list, ~ tibble(analysis = .y,
+                                                         statistic = .x$tab[1, "F"],
+                                                         p_value = .x$tab[1, "Pr(>F)"]))
+betadisper_results
+```
+
+
+# Plots
+
+```{r Plot function}
+plot_pcoa <- function(pcoa_object, subtitle, adonis_object) {
+
+  df <- pcoa_object$points
+
+  pc1_lab <- paste0("PCoA1 [", round(pcoa_object$var_exp[1] * 100, 2), "%]")
+  pc2_lab <- paste0("PCoA2 [", round(pcoa_object$var_exp[2] * 100, 2), "%]")
+
+  pval <- adonis_object$`Pr(>F)`[1]
+
+  subtitle_full <- paste0(subtitle, ", p = ", signif(pval, 3))
+
+  ggplot(df, aes(x = PC1, y = PC2, fill = diet_group, colour = diet_group)) +
+    stat_ellipse(
+      geom = "polygon",
+      alpha = 0.20,
+      linewidth = 0.7,
+      show.legend = FALSE) +
+    geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.3) +
+    geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.3) +
+    geom_point(
+      pch = 21,
+      size = 2.4,
+      colour = "black",
+      alpha = 0.90) +
+    scale_fill_manual(values = diet_colors) +
+    scale_colour_manual(values = diet_colors) +
+    labs(
+      title = NULL,
+      subtitle = subtitle_full,
+      x = pc1_lab,
+      y = pc2_lab) +
+    theme(
+      legend.position = "bottom",
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(
+        colour = "black",
+        fill = NA,
+        linewidth = 0.6))}
+```
+
+```{r plots}
+plot_pcoa_bray <- plot_pcoa(pcoa_results$Bray_Curtis, "Rel. Abund. Bray-Curtis", adonis_results_list$Bray_Curtis)
+plot_pcoa_jaccard <- plot_pcoa(pcoa_results$Jaccard, "Jaccard", adonis_results_list$Jaccard)
+plot_pcoa_aitch <- plot_pcoa(pcoa_results$Aitchison, "Aitchison", adonis_results_list$Aitchison)
+
+plot_pcoa_bray
+plot_pcoa_jaccard
+plot_pcoa_aitch
+```
+
+
+# Save
+
+```{r save}
+write_tsv(adonis_results, file.path(table_dir, "beta_permanova.tsv"))
+write_tsv(betadisper_results, file.path(table_dir, "beta_betadisper.tsv"))
+
+# Aitchison PCoA axes, used as microbiome composition covariates in 05.Microbiome_resistome_models.Rmd
+aitchison_axes <- as.data.frame(pcoa_results$Aitchison$pcoa$vectors[, 1:3]) %>%
+  rownames_to_column("sample_id") %>%
+  rename_with(~ paste0("microbiome_PC", 1:3), -sample_id)
+write_tsv(aitchison_axes, file.path(table_dir, "microbiome_aitchison_pcoa.tsv"))
+
+ggsave(file.path(plot_dir, "Bray_by_diet.png"), plot_pcoa_bray, width = 4.5, height = 5, dpi = 600)
+ggsave(file.path(plot_dir, "Jaccard_by_diet.png"), plot_pcoa_jaccard, width = 4.5, height = 5, dpi = 600)
+ggsave(file.path(plot_dir, "Aitch_by_diet.png"), plot_pcoa_aitch, width = 4.5, height = 5, dpi = 600)
+```

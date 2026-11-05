@@ -1,0 +1,247 @@
+---
+title: "06.ARG_WHO_classification"
+author: "Diego Coleto"
+date: "2026-10-20"
+output: html_document
+---
+
+Classification of every ResFinder variant according to the **WHO List of Medically Important Antimicrobials (MIA List, 2024)**,
+the update of the WHO Critically Important Antimicrobials list (6th revision, 2019).
+
+* Each variant is classified by the antibiotics in its ResFinder phenotype (`Data/Raw/Phenotypes/phenotypes.tsv`),
+  mapped to WHO classes and categories with `Data/Raw/WHO/who_mia_2024_antibiotics.tsv`.
+* A variant gets the highest category among its antibiotics:
+  Human use only > HPCIA > CIA > HIA > IA > Not medically important.
+  WHO states that classes authorized for human use only carry, at a minimum, an AMR risk similar to HPCIA.
+* `who_critical` = Human use only, HPCIA or CIA; `who_highest_priority` = Human use only or HPCIA.
+* Project decisions:
+  - Resistance to anti-pseudomonal penicillins **without** a β-lactamase inhibitor (piperacillin, ticarcillin) does not
+    make a gene critical; it is treated as HIA like the other penicillins. Otherwise narrow-spectrum penicillinases
+    (e.g. TEM-1) would be critical. Combinations with inhibitors, 3rd/4th-generation cephalosporins, carbapenems and
+    monobactams keep their WHO category.
+  - Variants whose ResFinder phenotype is only "Unknown Beta-lactam" (e.g. cepA, cfxA, cfiA, OXA-347) stay Unclassified.
+* Read-based CPMs (`cpm_gene_GPH.tsv`) are counted on gene families (`gene_family`, built by `00`), so a family
+  stands for all its variants. A family is classified by the variants of the gene it is named after (e.g.
+  `blaCTX-M-1` for the CTX-M-1 group), or by all its variants when no variant carries exactly that name
+  (families named by a root or an alias, such as `blaTEM` or `dfrA7/17`). It is critical / highest priority if
+  **most** of those variants are, so that a single variant cannot flip a whole family. Cluster-level
+  columns report whether the cluster contains critical variants and in which proportion. Assembly-based hits
+  (ABRicate on the full ResFinder database) are specific variants and use the variant-level classification.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(here)
+
+category_levels <- c("Human use only", "HPCIA", "CIA", "HIA", "IA", "Not medically important", "Unclassified")
+critical_categories <- c("Human use only", "HPCIA", "CIA")
+```
+
+# Load data
+
+```{r load data}
+phenotypes <- read_tsv(here("Data", "Raw", "Phenotypes", "phenotypes.tsv"), show_col_types = FALSE)
+clusters <- read_tsv(here("Data", "Processed", "phenotypes_cluster.tsv"), show_col_types = FALSE) %>%
+  select(gene, gene_family, cluster, is_representative)
+who <- read_tsv(here("Data", "Raw", "WHO", "who_mia_2024_antibiotics.tsv"), show_col_types = FALSE)
+```
+
+# Variant-level classification
+
+```{r variant}
+antibiotics_long <- phenotypes %>%
+  select(gene, gene_base, Phenotype) %>%
+  separate_longer_delim(Phenotype, delim = regex("[,;]")) %>%
+  mutate(antibiotic = str_squish(str_replace_all(Phenotype, "_", " "))) %>%
+  filter(antibiotic != "") %>%
+  left_join(who, by = "antibiotic") %>%
+  # Project decision: anti-pseudomonal penicillins without inhibitor do not make a gene critical
+  mutate(who_category = if_else(who_class == "Anti-pseudomonal penicillins", "HIA", who_category))
+
+cat("Antibiotics without WHO mapping:", unique(antibiotics_long$antibiotic[is.na(antibiotics_long$who_category)]), "\n")
+stopifnot(!anyNA(antibiotics_long$who_category))
+
+variant_class <- antibiotics_long %>%
+  mutate(who_category = factor(who_category, levels = category_levels)) %>%
+  group_by(gene, gene_base) %>%
+  summarise(antibiotics = paste(unique(antibiotic), collapse = "; "),
+            who_classes = paste(unique(who_class[who_category %in% critical_categories]), collapse = "; "),
+            who_category = levels(who_category)[min(as.integer(who_category))],
+            .groups = "drop") %>%
+  mutate(who_critical = who_category %in% critical_categories,
+         who_highest_priority = who_category %in% c("Human use only", "HPCIA"),
+         who_classes = na_if(who_classes, ""))
+
+count(variant_class, who_category)
+```
+
+# Cluster-level classification
+
+```{r cluster}
+cluster_class <- variant_class %>%
+  inner_join(clusters, by = "gene") %>%
+  group_by(cluster) %>%
+  summarise(cluster_n_variants = n(),
+            cluster_n_critical = sum(who_critical),
+            cluster_frac_critical = mean(who_critical),
+            cluster_who_category_max = category_levels[min(match(who_category, category_levels))],
+            .groups = "drop")
+
+arg_who <- variant_class %>%
+  inner_join(clusters, by = "gene") %>%
+  left_join(cluster_class, by = "cluster") %>%
+  relocate(gene_family, cluster, is_representative, .after = gene_base)
+
+stopifnot(nrow(arg_who) == nrow(phenotypes))
+```
+
+# Gene-family classification
+
+```{r family}
+family_class <- arg_who %>%
+  group_by(gene_family) %>%
+  mutate(named_variant = gene_base == gene_family,
+         basis = if (any(named_variant)) "named gene" else "any variant") %>%
+  filter(named_variant | basis == "any variant") %>%
+  summarise(family_basis = first(basis),
+            family_n_variants = n(),
+            family_frac_critical = mean(who_critical),
+            family_who_critical = family_frac_critical > 0.5,
+            family_who_highest_priority = mean(who_highest_priority) > 0.5,
+            .groups = "drop")
+
+count(family_class, family_basis, family_who_critical)
+
+# Families where "any variant critical" and "most variants critical" disagree
+family_class %>% filter(family_frac_critical > 0, !family_who_critical) %>% arrange(desc(family_frac_critical))
+
+# Families whose classification differs from that of their cluster representative (the previous unit)
+arg_who %>%
+  filter(is_representative) %>%
+  distinct(gene_family, representative = gene_base, representative_critical = who_critical) %>%
+  inner_join(family_class, by = "gene_family") %>%
+  filter(representative_critical != family_who_critical) %>%
+  select(gene_family, representative, representative_critical, family_who_critical, family_basis)
+
+arg_who <- arg_who %>% left_join(family_class, by = "gene_family")
+```
+
+Clusters whose representative is not critical but that contain critical variants:
+
+```{r heterogeneous clusters}
+arg_who %>%
+  filter(is_representative, !who_critical, cluster_n_critical > 0) %>%
+  select(gene, who_category, cluster_n_variants, cluster_n_critical, cluster_who_category_max) %>%
+  arrange(desc(cluster_n_critical))
+```
+
+# Agreement with the previous CIA list
+
+`Data/Raw/Food_resistome/list_cia.txt` (gene names) is kept only for comparison.
+
+```{r agreement}
+old_cia <- read_tsv(here("Data", "Raw", "Food_resistome", "list_cia.txt"), show_col_types = FALSE) %>%
+  distinct(gene_base = gene)
+
+agreement <- variant_class %>%
+  distinct(gene_base, who_critical) %>%
+  group_by(gene_base) %>%
+  summarise(who_critical = any(who_critical), .groups = "drop") %>%
+  mutate(in_old_list = gene_base %in% old_cia$gene_base)
+
+count(agreement, in_old_list, who_critical)
+```
+
+# MASTER CIA gene list (Quijada et al. 2025)
+
+`list_cia.txt` is byte-identical to `visualization_and_statistics/Figure_assembly_free/list_cia.txt` in the MASTER
+repository, the gene list behind the CIA analyses of Quijada et al. (Nat Microbiol 2025). The paper describes it only
+as AMRGs "conferring resistance to CIAs, selected according to previous publications" and does not define a
+highest-priority subset, so none is derived here. It is a curated subset: it has no aminoglycoside, fosfomycin,
+rifampicin or mupirocin genes, which the WHO 2024 list places in CIA or HPCIA. It is therefore kept as a
+complementary, explicitly named classification ("MASTER CIA list"); the WHO classification stays primary.
+
+Names are those of the 2022 ResFinder release. They are matched to `gene_base` in three steps, and nothing else is
+inferred from partial names:
+
+1. exact match;
+2. case only (`oqxA`, `oqxB` became `OqxA`, `OqxB`);
+3. allele renaming of `mcr-N`, whose alleles are now `mcr-N.M`; the list name is matched to every `mcr-N.M`
+   variant (all of them carry the same gene, and ResFinder kept the gene number).
+
+Entries left unmatched (van operon names, `crpP`, `mdf(A)`, `dldHA2X`) have no counterpart in the release used here
+and are recorded as absent. `mcr-10` is newer than the list and is not added to it. A gene family is on the list when
+most of the variants it is judged on (the same basis as the WHO family classification) are.
+
+```{r master cia}
+master_entries <- read_tsv(here("Data", "Raw", "Food_resistome", "list_cia.txt"), show_col_types = FALSE) %>%
+  distinct(list_gene = gene, list_class = Family)
+
+variant_names <- arg_who %>% distinct(gene, gene_base, gene_family, who_category, who_critical)
+
+match_entry <- function(name) {
+  exact <- variant_names %>% filter(gene_base == name)
+  if (nrow(exact) > 0) return(mutate(exact, match_type = "exact"))
+  by_case <- variant_names %>% filter(tolower(gene_base) == tolower(name))
+  if (nrow(by_case) > 0) return(mutate(by_case, match_type = "alias: case"))
+  if (str_detect(name, "^mcr-\\d+$")) {
+    alleles <- variant_names %>% filter(str_detect(gene_base, paste0("^", fixed(name), "\\.\\d+$")))
+    if (nrow(alleles) > 0) return(mutate(alleles, match_type = "alias: allele renaming"))
+  }
+  tibble(match_type = "absent")
+}
+
+master_mapping <- master_entries %>%
+  mutate(hits = map(list_gene, match_entry)) %>%
+  unnest(hits) %>%
+  mutate(classification = if_else(match_type == "absent", NA_character_, "MASTER CIA list"),
+         source = "list_cia.txt (MASTER; Quijada et al. 2025)",
+         decision = if_else(match_type == "absent",
+                            "Not mapped: no counterpart in the ResFinder release used",
+                            "Variant on the MASTER CIA list")) %>%
+  select(list_gene, list_class, match_type, gene, gene_base, gene_family, classification, source,
+         who_category, who_critical, decision)
+
+# A variant matched by two list entries of different class would be ambiguous
+ambiguous <- master_mapping %>% filter(!is.na(gene)) %>% group_by(gene) %>% filter(n_distinct(list_class) > 1)
+cat("Ambiguous variants:", nrow(ambiguous), "\n")
+stopifnot(nrow(ambiguous) == 0)
+
+count(master_mapping %>% distinct(list_gene, match_type), match_type)
+
+listed_variants <- master_mapping %>% filter(!is.na(gene)) %>% distinct(gene) %>% pull(gene)
+
+family_master <- arg_who %>%
+  mutate(master_listed = gene %in% listed_variants) %>%
+  group_by(gene_family) %>%
+  mutate(named_variant = gene_base == gene_family,
+         basis = if (any(named_variant)) "named gene" else "any variant") %>%
+  filter(named_variant | basis == "any variant") %>%
+  summarise(family_basis = first(basis),
+            family_n_variants = n(),
+            family_n_master_listed = sum(master_listed),
+            family_frac_master_listed = mean(master_listed),
+            family_master_cia = family_frac_master_listed > 0.5,
+            family_who_critical = first(family_who_critical),
+            .groups = "drop") %>%
+  mutate(decision = case_when(
+    family_master_cia & family_who_critical ~ "MASTER CIA and WHO critical",
+    family_master_cia ~ "MASTER CIA only",
+    family_who_critical & family_n_master_listed > 0 ~ "WHO critical; MASTER-listed variants are a minority",
+    family_who_critical ~ "WHO critical only",
+    family_n_master_listed > 0 ~ "Neither; MASTER-listed variants are a minority",
+    TRUE ~ "Neither"))
+
+count(family_master, family_master_cia, family_who_critical)
+```
+
+# Save
+
+```{r save}
+write_tsv(arg_who, here("Data", "Processed", "arg_who_classification.tsv"))
+write_tsv(master_mapping, here("Data", "Processed", "arg_cia_list_mapping.tsv"))
+write_tsv(family_master, here("Data", "Processed", "arg_family_master_cia.tsv"))
+```

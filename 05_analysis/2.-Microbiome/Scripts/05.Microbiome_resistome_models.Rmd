@@ -1,0 +1,435 @@
+---
+title: "05.Microbiome_resistome_models"
+author: "Diego Coleto"
+date: "2026-10-20"
+output: html_document
+---
+
+Microbiome ↔ resistome models.
+
+1. **Associations**: each microbiome feature (alpha diversity and Aitchison PCoA axes 1-3, z-scored) against
+   ARG load, richness and Simpson, with the same models as `1.-FFQ_analysis/Scripts/02.Score_associations.Rmd`
+   (lm / Poisson / lm, sex + age + BMI + log10 depth, BH within outcome).
+2. **Diet vs microbiome**: nested models (covariates → + diet group → + microbiome → both) to see how much of the
+   resistome variation is explained by diet and by the microbiome, and whether the diet effect remains after
+   accounting for the microbiome.
+3. **Community-level concordance**: Procrustes and Mantel test between microbiome and resistome Aitchison distances.
+4. **Diet beyond microbial diversity**: diet contrasts of the ARG metrics refitted adding species richness, to
+   tell a resistome-specific diet effect from a consequence of community diversity.
+
+**Why assembly size is not a covariate here.** The ARG metrics are read-based (reads mapped to ResFinder), so
+the assembly plays no part in measuring them and cannot bias them technically; sequencing depth is the
+technical covariate and is already in every model. Assembled Mb is in practice a second measurement of
+community diversity (Spearman 0.80 with species richness, which explains 62 % of its variance) and lies on the
+path diet → community → ARG detection, so adding it would be adjusting for a mediator twice. It is reported
+below only as a collinearity check. Assembly size *is* a legitimate covariate for assembly-based outcomes,
+where contig length and assembly quality do affect detection; that is where `3.-Assembly_based` uses it.
+
+Adjusting for species richness is itself a mediator adjustment: it describes how much of the diet effect is not
+shared with community richness, and is not a causal "direct effect".
+
+All models use complete cases (GPH_97 has no BMI).
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(here)
+library(phyloseq)
+library(vegan)
+library(broom)
+library(emmeans)
+
+table_dir <- here("2.-Microbiome", "Results", "Tables")
+plot_dir <- here("2.-Microbiome", "Results", "Plots")
+
+set.seed(1)
+```
+
+
+```{r theme set, include=FALSE}
+theme_set(
+  theme_minimal(base_size = 10) +
+    theme(
+      plot.title = element_text(face = "bold", size = 11),
+      plot.title.position = "plot",
+      panel.grid.minor = element_blank(),
+      legend.position = "bottom",
+      legend.title = element_text(face = "bold"),
+      strip.text = element_text(face = "bold"),
+      panel.grid.major.y = element_blank()))
+
+diet_colors <- c(
+  "Omnivore"   = "#2864A5",
+  "Vegetarian" = "#9C3F90",
+  "Vegan"      = "#B36B32")
+
+feature_colors <- c(
+  "Alpha diversity" = "#338040",
+  "Composition"     = "#4B1D6F")
+
+block_colors <- c(
+  "Diet group"           = "#B36B32",
+  "Microbiome"           = "#338040",
+  "Diet + microbiome"    = "#4B1D6F")
+```
+
+
+# Data load
+
+```{r data load}
+metadata <- read_tsv(here("Data", "Processed", "metadata.tsv"), show_col_types = FALSE)
+arg_metrics <- read_tsv(here("Data", "Processed", "arg_metrics.tsv"), show_col_types = FALSE)
+microbiome_alpha <- read_tsv(file.path(table_dir, "microbiome_alpha.tsv"), show_col_types = FALSE)
+microbiome_pcoa <- read_tsv(file.path(table_dir, "microbiome_aitchison_pcoa.tsv"), show_col_types = FALSE)
+assembly_stats <- read_tsv(here("Data", "Processed", "assembly_stats.tsv"), show_col_types = FALSE)
+
+model_data <- metadata %>%
+  transmute(sample_id,
+            diet_group = factor(diet_group, levels = names(diet_colors)),
+            sex = factor(sex, levels = c("Female", "Male")),
+            age, bmi, log10_depth = log10(reads)) %>%
+  inner_join(arg_metrics, by = "sample_id") %>%
+  inner_join(microbiome_alpha %>% transmute(sample_id, log_species = log(observed)), by = "sample_id") %>%
+  inner_join(microbiome_alpha %>% rename_with(~ paste0("microbiome_", .x), -sample_id), by = "sample_id") %>%
+  inner_join(microbiome_pcoa, by = "sample_id") %>%
+  inner_join(assembly_stats %>% transmute(sample_id, log_assembly_Mb = log(assembly_Mb)), by = "sample_id") %>%
+  drop_na(sex, age, bmi, log10_depth) %>%
+  mutate(across(starts_with("microbiome_"), ~ as.numeric(scale(.x))))
+
+stopifnot(nrow(model_data) == sum(!is.na(metadata$bmi)))
+
+cat("Samples in the models:", nrow(model_data), "\n")
+
+features <- tribble(
+  ~feature,               ~label,               ~type,
+  "microbiome_observed",  "Species richness",   "Alpha diversity",
+  "microbiome_shannon",   "Shannon",            "Alpha diversity",
+  "microbiome_simpson",   "Simpson",            "Alpha diversity",
+  "microbiome_PC1",       "Aitchison PCoA1",    "Composition",
+  "microbiome_PC2",       "Aitchison PCoA2",    "Composition",
+  "microbiome_PC3",       "Aitchison PCoA3",    "Composition")
+
+outcomes <- tribble(
+  ~outcome,       ~endpoint,       ~family,
+  "log_ARG_load", "ARG load",      "gaussian",
+  "richness",     "ARG richness",  "poisson",
+  "simpson",      "ARG Simpson",   "gaussian")
+
+covariates <- "sex + age + bmi + log10_depth"
+```
+
+
+# 1. Microbiome features and ARG metrics
+
+```{r associations}
+fit_feature_model <- function(feature, outcome, family, extra = "") {
+  formula_i <- as.formula(paste(outcome, "~", feature, "+", covariates, extra))
+  fit <- glm(formula_i, data = model_data, family = family)
+  crit <- if (family == "gaussian") qt(0.975, df.residual(fit)) else qnorm(0.975)
+
+  tidy(fit) %>%
+    filter(term == feature) %>%
+    transmute(estimate, se = std.error, p_value = p.value,
+              conf_low = estimate - crit * se,
+              conf_high = estimate + crit * se,
+              dispersion = sum(residuals(fit, type = "pearson")^2) / df.residual(fit),
+              n = nobs(fit))
+}
+
+fit_associations <- function(extra = "") {
+  expand_grid(features, outcomes) %>%
+    mutate(fit = pmap(list(feature, outcome, family), fit_feature_model, extra = extra)) %>%
+    unnest(fit) %>%
+    group_by(endpoint) %>%
+    mutate(p_adj = p.adjust(p_value, method = "BH")) %>%
+    ungroup() %>%
+    mutate(across(c(estimate, conf_low, conf_high),
+                  ~ if_else(family == "poisson", exp(.x), .x)),
+           effect = if_else(family == "poisson", "IRR", "beta"))
+}
+
+associations <- fit_associations()
+
+associations %>%
+  select(label, endpoint, effect, estimate, conf_low, conf_high, p_value, p_adj) %>%
+  arrange(endpoint, p_value) %>%
+  print(n = Inf)
+```
+
+Collinearity check: assembled Mb is largely a restatement of species richness, so it is not used as a covariate
+(see the header). The numbers behind that statement:
+
+```{r assembly collinearity}
+collinearity <- tibble(
+  quantity = c("Spearman, assembled Mb vs species richness",
+               "Spearman, assembled Mb vs log10 depth",
+               "R2 of log assembled Mb ~ species richness",
+               "R2 of log assembled Mb ~ log10 depth",
+               "R2 of log assembled Mb ~ both"),
+  value = c(cor(model_data$log_assembly_Mb, model_data$microbiome_observed, method = "spearman"),
+            cor(model_data$log_assembly_Mb, model_data$log10_depth, method = "spearman"),
+            summary(lm(log_assembly_Mb ~ log_species, model_data))$r.squared,
+            summary(lm(log_assembly_Mb ~ log10_depth, model_data))$r.squared,
+            summary(lm(log_assembly_Mb ~ log_species + log10_depth, model_data))$r.squared))
+collinearity
+```
+
+```{r forest plot, fig.width = 10, fig.height = 4.5}
+plot_data <- associations %>%
+  mutate(type = factor(type, levels = names(feature_colors)),
+         label = fct_rev(fct_inorder(label)),
+         endpoint = factor(endpoint, levels = outcomes$endpoint),
+         null_value = if_else(effect == "IRR", 1, 0))
+
+plot_associations <- ggplot(plot_data, aes(x = estimate, y = label, colour = type)) +
+  geom_vline(aes(xintercept = null_value), linetype = "dashed", colour = "grey50") +
+  geom_errorbar(aes(xmin = conf_low, xmax = conf_high), width = 0.2, orientation = "y") +
+  geom_point(aes(shape = p_adj < 0.05), size = 2.5) +
+  scale_shape_manual(values = c(`FALSE` = 1, `TRUE` = 16), labels = c("q ≥ 0.05", "q < 0.05"), name = NULL) +
+  scale_colour_manual(values = feature_colors, name = "Microbiome feature") +
+  facet_grid(type ~ endpoint, scales = "free", space = "free_y") +
+  labs(x = "Effect per 1-SD increase (beta; IRR for richness)", y = NULL)
+
+plot_associations
+```
+
+
+# 2. Diet group vs microbiome
+
+Microbiome block: Shannon + Aitchison PCoA1-3.
+R² for linear models and deviance explained (D²) for the Poisson model.
+
+```{r nested models}
+microbiome_terms <- "microbiome_shannon + microbiome_PC1 + microbiome_PC2 + microbiome_PC3"
+
+model_terms <- c(
+  "Covariates"        = covariates,
+  "Diet group"        = paste(covariates, "+ diet_group"),
+  "Microbiome"        = paste(covariates, "+", microbiome_terms),
+  "Diet + microbiome" = paste(covariates, "+ diet_group +", microbiome_terms))
+
+fit_nested <- function(outcome, family) {
+  map(model_terms, ~ glm(as.formula(paste(outcome, "~", .x)), data = model_data, family = family))
+}
+
+explained <- function(fit) 1 - fit$deviance / fit$null.deviance
+
+nested_fits <- outcomes %>%
+  mutate(fits = map2(outcome, family, fit_nested))
+
+model_comparison <- nested_fits %>%
+  mutate(summary = map(fits, ~ tibble(model = names(.x),
+                                      explained = map_dbl(.x, explained),
+                                      AIC = map_dbl(.x, AIC)))) %>%
+  select(endpoint, family, summary) %>%
+  unnest(summary) %>%
+  group_by(endpoint) %>%
+  mutate(gain_vs_covariates = explained - explained[model == "Covariates"],
+         delta_AIC = AIC - min(AIC)) %>%
+  ungroup()
+
+# Likelihood-ratio / F tests: each block on top of the other
+block_test <- function(fits, family, reduced, full) {
+  test <- if (family == "gaussian") "F" else "Chisq"
+  a <- anova(fits[[reduced]], fits[[full]], test = test)
+  a[[ncol(a)]][2]
+}
+
+block_tests <- nested_fits %>%
+  transmute(endpoint,
+            `Diet group (covariates)`    = map2_dbl(fits, family, block_test, "Covariates", "Diet group"),
+            `Diet group (+ microbiome)`  = map2_dbl(fits, family, block_test, "Microbiome", "Diet + microbiome"),
+            `Microbiome (covariates)`    = map2_dbl(fits, family, block_test, "Covariates", "Microbiome"),
+            `Microbiome (+ diet group)`  = map2_dbl(fits, family, block_test, "Diet group", "Diet + microbiome")) %>%
+  pivot_longer(-endpoint, names_to = "test", values_to = "p_value") %>%
+  left_join(outcomes %>% transmute(endpoint, test_type = if_else(family == "gaussian", "F", "likelihood ratio")),
+            by = "endpoint")
+
+model_comparison
+block_tests
+```
+
+```{r explained plot}
+plot_explained <- model_comparison %>%
+  filter(model != "Covariates") %>%
+  mutate(model = factor(model, levels = names(block_colors)),
+         endpoint = factor(endpoint, levels = outcomes$endpoint)) %>%
+  ggplot(aes(x = model, y = gain_vs_covariates, fill = model)) +
+  geom_col(width = 0.7, colour = "black", linewidth = 0.3) +
+  geom_text(aes(label = scales::percent(gain_vs_covariates, accuracy = 0.1)),
+            vjust = -0.4, size = 3) +
+  facet_wrap(~ endpoint, nrow = 1) +
+  scale_fill_manual(values = block_colors, guide = "none") +
+  scale_y_continuous(labels = scales::label_percent(accuracy = 1),
+                     expand = expansion(mult = c(0, 0.15))) +
+  labs(x = NULL, y = "Additional variance explained\n(R², D² for richness) over covariates") +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1),
+        panel.grid.major.x = element_blank())
+
+plot_explained
+```
+
+
+# 3. Microbiome and resistome composition
+
+```{r procrustes}
+ps <- readRDS(here("Data", "Processed", "phyloseq_species.rds"))
+cpm <- read_tsv(here("Data", "Processed", "cpm_gene_GPH.tsv"), show_col_types = FALSE)
+
+# Same filter and distance as 02.Beta_diversity.Rmd
+ps_beta <- ps %>%
+  filter_taxa(function(x) mean(x > 0) >= 0.10, prune = TRUE) %>%
+  transform_sample_counts(function(x) x / sum(x))
+
+samples <- intersect(sample_names(ps_beta), colnames(cpm))
+dist_microbiome <- vegdist(t(as(otu_table(ps_beta), "matrix"))[samples, ], method = "robust.aitchison")
+dist_resistome <- vegdist(cpm %>% column_to_rownames("gene_family") %>% t() %>% .[samples, ],
+                          method = "robust.aitchison")
+
+pcoa_microbiome <- cmdscale(dist_microbiome, k = 2)
+pcoa_resistome <- cmdscale(dist_resistome, k = 2)
+
+protest_result <- protest(pcoa_microbiome, pcoa_resistome, permutations = 9999)
+mantel_result <- mantel(dist_microbiome, dist_resistome, method = "spearman", permutations = 9999)
+
+concordance <- tibble(
+  test = c("Procrustes (PROTEST)", "Mantel (Spearman)"),
+  statistic_name = c("r", "rho"),
+  statistic = c(protest_result$t0, mantel_result$statistic),
+  p_value = c(protest_result$signif, mantel_result$signif))
+
+concordance
+```
+
+```{r procrustes plot}
+diet_lookup <- setNames(as.character(metadata$diet_group), metadata$sample_id)
+
+procrustes_df <- tibble(sample_id = samples,
+                        diet_group = factor(diet_lookup[samples], levels = names(diet_colors)),
+                        x_microbiome = protest_result$X[, 1], y_microbiome = protest_result$X[, 2],
+                        x_resistome = protest_result$Yrot[, 1], y_resistome = protest_result$Yrot[, 2])
+
+plot_procrustes <- ggplot(procrustes_df) +
+  geom_segment(aes(x = x_microbiome, y = y_microbiome, xend = x_resistome, yend = y_resistome,
+                   colour = diet_group), alpha = 0.5, linewidth = 0.4) +
+  geom_point(aes(x = x_microbiome, y = y_microbiome, fill = diet_group),
+             pch = 21, size = 2.2, colour = "black") +
+  geom_point(aes(x = x_resistome, y = y_resistome, fill = diet_group),
+             pch = 24, size = 2, colour = "black", alpha = 0.7) +
+  scale_fill_manual(values = diet_colors, name = NULL) +
+  scale_colour_manual(values = diet_colors, guide = "none") +
+  labs(x = "Dimension 1", y = "Dimension 2",
+       subtitle = paste0("Microbiome (●) vs resistome (▲) Aitchison PCoA; Procrustes r = ",
+                         round(protest_result$t0, 3), ", p = ", signif(protest_result$signif, 3))) +
+  theme(panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.6),
+        panel.grid.major = element_blank(),
+        plot.subtitle = element_text(size = 9, colour = "grey30"))
+
+plot_procrustes
+```
+
+
+# 4. Does diet shape the resistome beyond microbial diversity?
+
+Omnivores have both a richer microbiome and a richer resistome. The diet contrasts of each ARG metric are
+refitted adding log species richness. If the diet effect on ARG richness disappears once species richness is in
+the model, the resistome difference follows community diversity rather than being a resistome-specific effect of
+diet. Effects: ratio for ARG load (log scale) and richness (Poisson), difference for Simpson; Tukey-adjusted
+within each model.
+
+```{r diversity adjustment}
+adjustments <- c(
+  "None"               = "",
+  "+ species richness" = "+ log_species")
+
+diversity_fits <- expand_grid(outcomes, adjustment = names(adjustments)) %>%
+  mutate(fit = pmap(list(outcome, family, adjustment), function(outcome, family, adjustment) {
+    glm(as.formula(paste(outcome, "~ diet_group +", covariates, adjustments[[adjustment]])),
+        data = model_data, family = family)
+  }))
+
+diet_contrasts <- function(fit) {
+  ct <- emmeans(fit, pairwise ~ diet_group, adjust = "tukey")$contrasts
+  ci <- as.data.frame(confint(ct))
+  tibble(contrast = ci$contrast, estimate = ci$estimate,
+         conf_low = ci[[intersect(c("lower.CL", "asymp.LCL"), names(ci))]],
+         conf_high = ci[[intersect(c("upper.CL", "asymp.UCL"), names(ci))]],
+         p_adj = as.data.frame(ct)$p.value)
+}
+
+diet_beyond_diversity <- diversity_fits %>%
+  mutate(contrasts = map(fit, diet_contrasts)) %>%
+  select(endpoint, outcome, adjustment, contrasts) %>%
+  unnest(contrasts) %>%
+  mutate(effect = if_else(outcome == "simpson", "difference", "ratio"),
+         across(c(estimate, conf_low, conf_high), ~ if_else(effect == "ratio", exp(.x), .x)),
+         adjustment = factor(adjustment, levels = names(adjustments)))
+
+diet_beyond_diversity %>%
+  select(endpoint, contrast, adjustment, estimate, conf_low, conf_high, p_adj) %>%
+  mutate(across(where(is.numeric), ~ signif(.x, 3))) %>%
+  print(n = Inf)
+
+# Coefficients of the diversity term (log-log: elasticity for load and richness)
+diversity_terms <- diversity_fits %>%
+  mutate(terms = map(fit, ~ tidy(.x) %>%
+                       filter(term == "log_species") %>%
+                       select(term, estimate, se = std.error, p_value = p.value))) %>%
+  select(endpoint, adjustment, terms) %>%
+  unnest(terms)
+
+diversity_terms %>% mutate(across(where(is.numeric), ~ signif(.x, 3)))
+```
+
+```{r diversity adjustment plot, fig.width = 10, fig.height = 4.5}
+adjustment_colors <- c("None" = "grey40", "+ species richness" = "#338040")
+
+plot_beyond_diversity <- diet_beyond_diversity %>%
+  mutate(endpoint = factor(endpoint, levels = outcomes$endpoint),
+         contrast = fct_rev(fct_inorder(contrast)),
+         null_value = if_else(effect == "ratio", 1, 0)) %>%
+  ggplot(aes(x = estimate, y = contrast, colour = adjustment)) +
+  geom_vline(aes(xintercept = null_value), linetype = "dashed", colour = "grey50") +
+  # group = adjustment in both layers: otherwise the shape aesthetic enters the dodge grouping of the points
+  # and they land on the other model's error bar whenever the two models differ in significance
+  geom_errorbar(aes(xmin = conf_low, xmax = conf_high, group = adjustment), width = 0.25, orientation = "y",
+                position = position_dodge(width = 0.7)) +
+  geom_point(aes(shape = p_adj < 0.05, group = adjustment), size = 2.3, position = position_dodge(width = 0.7)) +
+  scale_shape_manual(values = c(`FALSE` = 1, `TRUE` = 16),
+                     labels = c("adjusted p ≥ 0.05", "adjusted p < 0.05"), name = NULL) +
+  scale_colour_manual(values = adjustment_colors, name = "Adjustment") +
+  facet_wrap(~ endpoint, scales = "free_x") +
+  labs(x = "Diet contrast (ratio; difference for Simpson), Tukey 95% CI", y = NULL) +
+  guides(colour = guide_legend(nrow = 2))
+
+plot_beyond_diversity
+```
+
+
+# Save
+
+```{r save}
+write_tsv(associations %>% select(-family), file.path(table_dir, "microbiome_ARG_associations.tsv"))
+write_tsv(collinearity, file.path(table_dir, "assembly_size_collinearity.tsv"))
+write_tsv(diet_beyond_diversity, file.path(table_dir, "diet_contrasts_beyond_diversity.tsv"))
+write_tsv(diversity_terms, file.path(table_dir, "diet_contrasts_diversity_terms.tsv"))
+write_tsv(model_comparison, file.path(table_dir, "diet_microbiome_model_comparison.tsv"))
+write_tsv(block_tests, file.path(table_dir, "diet_microbiome_block_tests.tsv"))
+write_tsv(concordance, file.path(table_dir, "microbiome_resistome_concordance.tsv"))
+write_tsv(procrustes_df, file.path(table_dir, "procrustes_coordinates.tsv"))
+
+# Spearman correlation of ARG and species richness on all participants with both measures (no covariates)
+richness_pairs <- arg_metrics %>% inner_join(microbiome_alpha, by = "sample_id")
+rho_test <- cor.test(richness_pairs$richness, richness_pairs$observed, method = "spearman", exact = FALSE)
+write_tsv(tibble(x = "ARG richness", y = "Species richness", spearman_rho = unname(rho_test$estimate),
+                 p_value = rho_test$p.value, n = nrow(richness_pairs)),
+          file.path(table_dir, "richness_correlation.tsv"))
+
+ggsave(file.path(plot_dir, "Microbiome_ARG_associations.png"), plot_associations, width = 10, height = 4.5, dpi = 600, bg = "white")
+ggsave(file.path(plot_dir, "Diet_vs_microbiome_explained.png"), plot_explained, width = 9, height = 4.5, dpi = 600, bg = "white")
+ggsave(file.path(plot_dir, "Microbiome_resistome_procrustes.png"), plot_procrustes, width = 6, height = 5.5, dpi = 600, bg = "white")
+ggsave(file.path(plot_dir, "Diet_contrasts_beyond_diversity.png"), plot_beyond_diversity, width = 10, height = 4.5, dpi = 600, bg = "white")
+```

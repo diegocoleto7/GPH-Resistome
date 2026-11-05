@@ -1,0 +1,368 @@
+---
+title: "03.Multi_ARG_by_diet"
+author: "Diego Coleto"
+date: "2026-10-20"
+output: html_document
+---
+
+Assembly-based resistome by diet group and by origin / NOVA diet scores.
+
+Why proportions and contig-level models: the number of ARG contigs grows with sequencing depth and assembly size,
+whereas proportions are stable (Zaheer et al. 2018, Sci Rep). Following Li et al. 2024 (Microbiome), outcomes are
+modelled at contig level, among ARG-carrying contigs, with logistic mixed models:
+
+outcome ~ exposure + log(contig length) + sex + age + BMI + log10 depth + (1 | sample)
+
+* log(contig length): longer contigs are more likely to carry several ARGs or mobile elements.
+* (1 | sample): contigs of the same person are not independent.
+* Exposures: diet group (Tukey pairwise odds ratios, as in part 0) or one origin / NOVA score at a time
+  (z-scored, BH within system and outcome, as in part 1).
+* Sensitivity: sample-level binomial GLM on the proportions (no contig length) and, when assembly statistics are
+  available, adding log(assembled Mb) and N50 as covariates.
+
+Outcomes (among ARG contigs): multi-ARG contig (≥ 2 distinct ARGs), contig with a WHO critical ARG, contig with a
+highest-priority ARG, multi-ARG contig with a critical ARG and contig with a mobile element.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(here)
+library(glmmTMB)
+library(emmeans)
+library(ggpubr)
+library(patchwork)
+library(broom)
+library(broom.mixed)
+
+table_dir <- here("3.-Assembly_based", "Results", "Tables")
+plot_dir <- here("3.-Assembly_based", "Results", "Plots")
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+
+```{r theme set, include=FALSE}
+diet_colors <- c(
+  "Omnivore"   = "#2864A5",
+  "Vegetarian" = "#9C3F90",
+  "Vegan"      = "#B36B32")
+
+system_colors <- c(
+  "Origin" = "#338040",
+  "NOVA"   = "#4B1D6F")
+
+theme_set(
+  theme_minimal(base_size = 10) +
+    theme(
+      plot.title = element_text(face = "bold", size = 11),
+      plot.title.position = "plot",
+      panel.grid.minor = element_blank(),
+      legend.position = "bottom",
+      legend.title = element_text(face = "bold"),
+      strip.text = element_text(face = "bold"),
+      panel.grid.major.y = element_blank()))
+```
+
+
+# Data load
+
+```{r data load}
+arg_contigs <- read_tsv(file.path(table_dir, "arg_contigs.tsv"), show_col_types = FALSE)
+arg_sample_summary <- read_tsv(file.path(table_dir, "arg_sample_summary.tsv"), show_col_types = FALSE)
+score_info <- read_tsv(here("1.-FFQ_analysis", "Results", "Tables", "score_info.tsv"), show_col_types = FALSE) %>%
+  filter(system != "NOVA (sensitivity)")
+
+has_assembly_stats <- "assembly_Mb" %in% names(arg_sample_summary)
+
+sample_covariates <- arg_sample_summary %>%
+  select(sample_id, diet_group, sex, age, bmi, log10_depth, assembly_Mb, N50, all_of(score_info$score)) %>%
+  mutate(diet_group = factor(diet_group, levels = names(diet_colors)),
+         sex = factor(sex, levels = c("Female", "Male")),
+         across(all_of(score_info$score), ~ as.numeric(scale(.x)), .names = "{.col}_z"))
+
+contig_data <- arg_contigs %>%
+  mutate(multi_critical = multi_ARG & has_critical) %>%
+  inner_join(sample_covariates, by = "sample_id") %>%
+  drop_na(sex, age, bmi, log10_depth)
+
+outcomes <- c(
+  "multi_ARG"            = "Multi-ARG contig",
+  "has_critical"         = "Critical ARG",
+  "has_highest_priority" = "Highest-priority ARG",
+  "multi_critical"       = "Multi-ARG with critical ARG",
+  "has_mobile_element"   = "Mobile element")
+
+covariates <- "log_contig_length + sex + age + bmi + log10_depth"
+
+cat("Contigs:", nrow(contig_data), "| samples:", n_distinct(contig_data$sample_id), "\n")
+contig_data %>%
+  group_by(diet_group) %>%
+  summarise(contigs = n(), across(all_of(names(outcomes)), ~ round(mean(.x) * 100, 1)))
+```
+
+
+# Assembly quality by diet group
+
+If assembly size or contiguity differed between diets, differences in contig-level outcomes could be technical.
+
+```{r assembly quality}
+assembly_quality <- arg_sample_summary %>%
+  mutate(diet_group = factor(diet_group, levels = names(diet_colors)),
+         sex = factor(sex, levels = c("Female", "Male")))
+
+assembly_metrics <- c("assembly_Mb" = "Assembled Mb", "N50" = "N50", "n_contigs" = "Number of contigs",
+                      "coverage_weighted_Mb" = "Coverage-weighted Mb")
+
+assembly_by_diet <- imap_dfr(assembly_metrics, function(label, metric) {
+  kw <- kruskal.test(as.formula(paste(metric, "~ diet_group")), data = assembly_quality)
+  fit <- lm(as.formula(paste0("log(", metric, ") ~ diet_group + sex + age + bmi + log10_depth")), data = assembly_quality)
+  tidy(fit) %>%
+    filter(str_detect(term, "diet_group")) %>%
+    transmute(metric = label, contrast = paste(str_remove(term, "diet_group"), "vs Omnivore"),
+              ratio = exp(estimate), p_value = p.value, kruskal_p = kw$p.value)
+})
+
+assembly_by_diet
+
+# The same models as Tukey-adjusted pairwise ratios, the adjustment used for every other diet contrast
+assembly_tukey <- imap_dfr(assembly_metrics, function(label, metric) {
+  fit <- lm(as.formula(paste0("log(", metric, ") ~ diet_group + sex + age + bmi + log10_depth")), data = assembly_quality)
+  emmeans(fit, pairwise ~ diet_group, adjust = "tukey")$contrasts %>%
+    summary(infer = TRUE) %>%
+    as.data.frame() %>%
+    separate(contrast, into = c("group1", "group2"), sep = " - ") %>%
+    transmute(metric = label, group1, group2, ratio = exp(estimate), conf_low = exp(lower.CL),
+              conf_high = exp(upper.CL), p_adj = p.value, n = nobs(fit))
+})
+assembly_tukey
+
+assembly_quality %>%
+  group_by(diet_group) %>%
+  summarise(across(names(assembly_metrics), median))
+
+# Depth dependence of assembly size
+assembly_quality %>%
+  summarise(across(names(assembly_metrics), ~ cor(.x, log10_depth, method = "spearman")))
+```
+
+
+# Diet group
+
+```{r diet models}
+fit_diet <- function(outcome, extra = "") {
+  formula_i <- as.formula(paste(outcome, "~ diet_group +", covariates, extra, "+ (1 | sample_id)"))
+  glmmTMB(formula_i, data = contig_data, family = binomial)
+}
+
+diet_fits <- map(names(outcomes), fit_diet) %>% set_names(names(outcomes))
+
+# Estimated probability for each diet group (other covariates at their mean)
+diet_estimates <- imap_dfr(diet_fits, function(fit, outcome) {
+  emmeans(fit, ~ diet_group, type = "response") %>%
+    as.data.frame() %>%
+    transmute(outcome, diet_group, estimate = prob, conf_low = asymp.LCL, conf_high = asymp.UCL)
+})
+
+# Tukey pairwise odds ratios
+diet_comparisons <- imap_dfr(diet_fits, function(fit, outcome) {
+  emmeans(fit, pairwise ~ diet_group, type = "response", adjust = "tukey")$contrasts %>%
+    as.data.frame() %>%
+    separate(contrast, into = c("group1", "group2"), sep = " / ") %>%
+    transmute(outcome, group1, group2, odds_ratio = odds.ratio, SE, p.adj = p.value,
+              p.signif = case_when(p.adj < 0.001 ~ "***",
+                                   p.adj < 0.01 ~ "**",
+                                   p.adj < 0.05 ~ "*",
+                                   TRUE ~ "ns"))
+})
+
+diet_comparisons %>% as_tibble() %>% mutate(outcome = outcomes[outcome]) %>% print(n = Inf)
+
+# Convergence of each mixed model (positive-definite Hessian) and the definition of each outcome.
+# "has_mobile_element" is the broad flag: any MAP annotation on the contig, including structural evidence.
+outcome_definitions <- c(
+  "multi_ARG"            = "At least two ARG hits on the contig",
+  "has_critical"         = "At least one WHO-critical ARG (CIA, HPCIA or human use only)",
+  "has_highest_priority" = "At least one ARG for HPCIA or human-use-only antimicrobials",
+  "multi_critical"       = "Multi-ARG contig with at least one WHO-critical ARG",
+  "has_mobile_element"   = "Any MGE annotation from MAP (broad flag)")
+contig_model_diagnostics <- imap_dfr(diet_fits, ~ tibble(
+  outcome = .y, label = outcomes[[.y]], definition = outcome_definitions[[.y]],
+  converged = isTRUE(.x$sdr$pdHess), n_contigs = nobs(.x),
+  n_samples = n_distinct(contig_data$sample_id), positives = sum(contig_data[[.y]])))
+contig_model_diagnostics
+```
+
+## Sensitivity
+
+```{r sensitivity}
+# 1. Sample-level binomial GLM on proportions (no contig length, no random effect)
+sample_level <- arg_sample_summary %>%
+  mutate(diet_group = factor(diet_group, levels = names(diet_colors)),
+         sex = factor(sex, levels = c("Female", "Male")),
+         n_highest_priority_contigs = NA_real_) %>%
+  drop_na(bmi)
+
+sensitivity_sample <- tribble(
+  ~outcome,         ~successes,                 ~trials,
+  "multi_ARG",      "n_multi_ARG_contigs",      "n_ARG_contigs",
+  "has_critical",   "n_critical_contigs",       "n_ARG_contigs",
+  "multi_critical", "n_multi_critical_contigs", "n_ARG_contigs",
+  "has_mobile_element", "n_mobile_contigs",     "n_ARG_contigs") %>%
+  mutate(fit = map2(successes, trials, ~ glm(
+    as.formula(paste0("cbind(", .x, ", ", .y, " - ", .x, ") ~ diet_group + sex + age + bmi + log10_depth")),
+    data = sample_level, family = quasibinomial)),
+    coefs = map(fit, ~ tidy(.x, exponentiate = TRUE, conf.int = TRUE) %>% filter(str_detect(term, "diet_group")))) %>%
+  select(outcome, coefs) %>%
+  unnest(coefs) %>%
+  transmute(model = "Sample-level quasi-binomial", outcome, term = str_remove(term, "diet_group"),
+            odds_ratio = estimate, conf_low = conf.low, conf_high = conf.high, p_value = p.value)
+
+# 2. Assembly statistics as covariates (only when available)
+sensitivity_assembly <- if (has_assembly_stats) {
+  imap_dfr(map(names(outcomes), fit_diet, extra = "+ log(assembly_Mb) + log(N50)") %>% set_names(names(outcomes)),
+           ~ tidy(.x, effects = "fixed", exponentiate = TRUE, conf.int = TRUE) %>%
+             filter(str_detect(term, "diet_group")) %>%
+             transmute(model = "Contig-level + assembly size and N50", outcome = .y,
+                       term = str_remove(term, "diet_group"), odds_ratio = estimate,
+                       conf_low = conf.low, conf_high = conf.high, p_value = p.value))
+} else tibble()
+
+main_vs_omnivore <- imap_dfr(diet_fits, ~ tidy(.x, effects = "fixed", exponentiate = TRUE, conf.int = TRUE) %>%
+                               filter(str_detect(term, "diet_group")) %>%
+                               transmute(model = "Contig-level mixed model (main)", outcome = .y,
+                                         term = str_remove(term, "diet_group"), odds_ratio = estimate,
+                                         conf_low = conf.low, conf_high = conf.high, p_value = p.value))
+
+diet_sensitivity <- bind_rows(main_vs_omnivore, sensitivity_sample, sensitivity_assembly) %>%
+  mutate(contrast = paste(term, "vs Omnivore")) %>%
+  select(model, outcome, contrast, odds_ratio, conf_low, conf_high, p_value) %>%
+  arrange(outcome, contrast, model)
+
+diet_sensitivity %>% as_tibble() %>% mutate(outcome = outcomes[outcome]) %>% print(n = Inf)
+```
+
+## Plot
+
+```{r plot functions}
+set_relative_pvalue_positions <- function(comparison_df,
+                                          estimate_df,
+                                          lower_padding = 0.50,
+                                          bracket_start = 0.12,
+                                          bracket_step = 0.10,
+                                          upper_padding = 0.08) {
+  data_min <- min(estimate_df$conf_low, na.rm = TRUE)
+  data_max <- max(estimate_df$conf_high, na.rm = TRUE)
+  data_range <- data_max - data_min
+
+  if (!is.finite(data_range) || data_range == 0) {
+    data_range <- abs(data_max) * 0.1
+    if (data_range == 0) {
+      data_range <- 1}}
+
+  comparison_df <- comparison_df %>%
+    mutate(y.position = data_max +
+             data_range * bracket_start +
+             data_range * bracket_step * (row_number() - 1))
+
+  y_lower <- max(0, data_min - data_range * lower_padding)
+  y_upper <- max(comparison_df$y.position, na.rm = TRUE) + data_range * upper_padding
+
+  list(comparison = comparison_df,
+       limits = c(y_lower, y_upper))}
+
+plot_means <- function(outcome_i) {
+  estimate_df <- diet_estimates %>% filter(outcome == outcome_i)
+  positions <- set_relative_pvalue_positions(diet_comparisons %>% filter(outcome == outcome_i), estimate_df)
+
+  ggplot(estimate_df, aes(x = diet_group, y = estimate, colour = diet_group)) +
+    geom_errorbar(aes(ymin = conf_low, ymax = conf_high), width = 0.12, linewidth = 0.9) +
+    geom_point(size = 3) +
+    scale_colour_manual(values = diet_colors, guide = "none") +
+    stat_pvalue_manual(positions$comparison,
+                       xmin = "group1",
+                       xmax = "group2",
+                       y.position = "y.position",
+                       label = "p.signif",
+                       bracket.size = 0.8,
+                       tip.length = 0.01,
+                       size = 4) +
+    scale_y_continuous(labels = scales::label_percent(accuracy = 1)) +
+    coord_cartesian(ylim = positions$limits, clip = "off") +
+    labs(title = outcomes[outcome_i], x = NULL, y = "Probability among ARG contigs") +
+    theme_classic(base_size = 10) +
+    theme(plot.title = element_text(size = 11, face = "bold"),
+          axis.text.x = element_text(face = "bold", colour = unname(diet_colors), size = 9),
+          axis.title.y = element_text(face = "bold", size = 9),
+          axis.line = element_line(linewidth = 0.5),
+          axis.ticks = element_line(linewidth = 0.5),
+          plot.margin = margin(t = 8, r = 5, b = 5, l = 5))
+}
+```
+
+```{r diet plot, warning=FALSE}
+plot_diet <- wrap_plots(map(names(outcomes), plot_means), nrow = 1)
+plot_diet
+```
+
+
+# Origin and NOVA scores
+
+```{r score models}
+fit_score <- function(score, outcome) {
+  formula_i <- as.formula(paste(outcome, "~", paste0(score, "_z"), "+", covariates, "+ (1 | sample_id)"))
+  fit <- glmmTMB(formula_i, data = contig_data, family = binomial)
+  tidy(fit, effects = "fixed", conf.int = TRUE) %>%
+    filter(term == paste0(score, "_z")) %>%
+    transmute(estimate, conf_low = conf.low, conf_high = conf.high, p_value = p.value)
+}
+
+score_results <- expand_grid(score_info, outcome = names(outcomes)) %>%
+  mutate(fit = map2(score, outcome, fit_score)) %>%
+  unnest(fit) %>%
+  group_by(system, outcome) %>%
+  mutate(p_adj = p.adjust(p_value, method = "BH")) %>%
+  ungroup() %>%
+  mutate(across(c(estimate, conf_low, conf_high), exp),
+         endpoint = outcomes[outcome])
+
+score_results %>%
+  select(system, label, endpoint, odds_ratio = estimate, conf_low, conf_high, p_value, p_adj) %>%
+  arrange(endpoint, p_value) %>%
+  print(n = Inf)
+```
+
+```{r score plot, fig.width = 13, fig.height = 5}
+plot_scores <- score_results %>%
+  mutate(system = factor(system, levels = names(system_colors)),
+         label = fct_rev(fct_inorder(label)),
+         endpoint = factor(endpoint, levels = outcomes)) %>%
+  ggplot(aes(x = estimate, y = label, colour = system)) +
+  geom_vline(xintercept = 1, linetype = "dashed", colour = "grey50") +
+  geom_errorbar(aes(xmin = conf_low, xmax = conf_high), width = 0.2, orientation = "y") +
+  geom_point(aes(shape = p_adj < 0.05), size = 2.5) +
+  scale_shape_manual(values = c(`FALSE` = 1, `TRUE` = 16), labels = c("q ≥ 0.05", "q < 0.05"), name = NULL) +
+  scale_colour_manual(values = system_colors, name = "Classification") +
+  scale_x_log10() +
+  facet_grid(system ~ endpoint, scales = "free_y", space = "free_y") +
+  labs(x = "Odds ratio per 1-SD increase (log scale)", y = NULL)
+
+plot_scores
+```
+
+
+# Save
+
+```{r save}
+write_tsv(assembly_by_diet, file.path(table_dir, "assembly_quality_by_diet.tsv"))
+write_tsv(assembly_tukey, file.path(table_dir, "assembly_quality_tukey.tsv"))
+write_tsv(contig_model_diagnostics, file.path(table_dir, "contig_model_diagnostics.tsv"))
+write_tsv(diet_estimates, file.path(table_dir, "contig_outcomes_diet_estimates.tsv"))
+write_tsv(diet_comparisons, file.path(table_dir, "contig_outcomes_diet_comparisons.tsv"))
+write_tsv(diet_sensitivity, file.path(table_dir, "contig_outcomes_diet_sensitivity.tsv"))
+write_tsv(score_results, file.path(table_dir, "contig_outcomes_scores.tsv"))
+
+ggsave(file.path(plot_dir, "Contig_outcomes_by_diet.png"), plot_diet, width = 16, height = 5, dpi = 600, bg = "white")
+ggsave(file.path(plot_dir, "Contig_outcomes_by_scores.png"), plot_scores, width = 13, height = 5, dpi = 600, bg = "white")
+```

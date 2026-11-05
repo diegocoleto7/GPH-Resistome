@@ -1,0 +1,261 @@
+---
+title: "02.Score_associations"
+author: "Diego Coleto"
+date: "2026-07-01"
+output: html_document
+---
+
+Association between each diet score (origin and NOVA) and the resistome.
+
+* Outcomes and models are the same as in `0.-Diet_group/Scripts/01.Diet_models.Rmd`:
+  ARG load = log(total CPM) (lm), richness (Poisson glm) and Simpson (lm).
+* Scores are standardised (z), so effects are per 1-SD increase in times/day.
+* Covariates: sex + age + BMI + log10 sequencing depth.
+* p-values are BH-adjusted within each system (Origin, NOVA) and outcome.
+
+Two sensitivity models are fitted alongside each main model, because they decide how the result should be read:
+
+* **+ diet group, NOVA only.** Food processing is conceptually unrelated to the omnivore-vegetarian-vegan
+  pattern (diet group explains ≤ 5.4 % of any NOVA score), so a NOVA score that survives the adjustment is a
+  genuinely orthogonal axis of diet. The origin scores are **not** adjusted: the diet groups are defined by
+  animal-food intake (diet group explains 56-67 % of the animal scores, and 95 % of vegans score 0 on animal
+  primary), so adjusting one for the other enters the same variable twice and its loss of significance is
+  expected by construction. Origin scores are read as the diet-group gradient in continuous form.
+* **+ total intake** (the sum of all food times/day, identical whether added up by origin or by NOVA, since
+  both partition the same 185 FFQ items). This answers the obvious objection that an association with a food
+  group only reflects eating more in total.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(here)
+library(broom)
+
+table_dir <- here("1.-FFQ_analysis", "Results", "Tables")
+plot_dir <- here("1.-FFQ_analysis", "Results", "Plots")
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+
+```{r theme set, include=FALSE}
+theme_set(
+  theme_minimal(base_size = 10) +
+    theme(
+      plot.title = element_text(face = "bold", size = 11),
+      plot.title.position = "plot",
+      panel.grid.minor = element_blank(),
+      legend.position = "bottom",
+      legend.title = element_text(face = "bold"),
+      strip.text = element_text(face = "bold"),
+      panel.grid.major.y = element_blank()))
+
+system_colors <- c(
+  "Origin" = "#338040",
+  "NOVA"   = "#4B1D6F")
+```
+
+
+# Data load
+
+```{r data load}
+analysis_data <- read_tsv(file.path(table_dir, "analysis_data.tsv"), show_col_types = FALSE) %>%
+  mutate(sex = factor(sex, levels = c("Female", "Male")),
+         diet_group = factor(diet_group, levels = c("Omnivore", "Vegetarian", "Vegan")))
+score_info <- read_tsv(file.path(table_dir, "score_info.tsv"), show_col_types = FALSE)
+
+# Total intake: the six origin scores and the four NOVA groups are two partitions of the same FFQ,
+# so either sum gives the same total. Checked rather than assumed.
+origin_scores <- score_info$score[score_info$system == "Origin"]
+nova_scores <- score_info$score[score_info$system == "NOVA"]
+analysis_data <- analysis_data %>%
+  mutate(total_intake = rowSums(across(all_of(origin_scores))))
+stopifnot(isTRUE(all.equal(analysis_data$total_intake,
+                           rowSums(analysis_data[nova_scores]))))
+cat("Total intake (times/day): median", round(median(analysis_data$total_intake), 1),
+    "| range", paste(round(range(analysis_data$total_intake), 1), collapse = " - "), "\n")
+```
+
+
+# Models
+
+```{r models}
+covariates <- "sex + age + bmi + log10_depth"
+
+outcomes <- tribble(
+  ~outcome,       ~endpoint,       ~family,
+  "log_ARG_load", "ARG load",      "gaussian",
+  "richness",     "ARG richness",  "poisson",
+  "simpson",      "ARG Simpson",   "gaussian")
+
+fit_score_model <- function(score, outcome, family, extra = "") {
+  model_df <- analysis_data %>%
+    mutate(score_z = as.numeric(scale(.data[[score]])),
+           total_intake_z = as.numeric(scale(total_intake)))
+  formula_i <- as.formula(paste(outcome, "~ score_z +", covariates, extra))
+  fit <- glm(formula_i, data = model_df, family = family)
+  # t quantile for linear models (as lm), normal quantile for Poisson
+  crit <- if (family == "gaussian") qt(0.975, df.residual(fit)) else qnorm(0.975)
+
+  tidy(fit) %>%
+    filter(term == "score_z") %>%
+    transmute(estimate, se = std.error, statistic, p_value = p.value,
+              conf_low = estimate - crit * se,
+              conf_high = estimate + crit * se,
+              dispersion = sum(residuals(fit, type = "pearson")^2) / df.residual(fit),
+              n = nobs(fit))
+}
+
+results <- expand_grid(score_info, outcomes) %>%
+  mutate(fit = pmap(list(score, outcome, family), fit_score_model)) %>%
+  unnest(fit) %>%
+  group_by(system, endpoint) %>%
+  mutate(p_adj = p.adjust(p_value, method = "BH")) %>%
+  ungroup() %>%
+  # Richness effects as incidence rate ratios
+  mutate(across(c(estimate, conf_low, conf_high),
+                ~ if_else(family == "poisson", exp(.x), .x)),
+         effect = if_else(family == "poisson", "IRR", "beta"),
+         p_signif = case_when(p_adj < 0.001 ~ "***",
+                              p_adj < 0.01 ~ "**",
+                              p_adj < 0.05 ~ "*",
+                              TRUE ~ "ns"))
+```
+
+```{r dispersion}
+results %>%
+  filter(family == "poisson") %>%
+  summarise(min_dispersion = min(dispersion), max_dispersion = max(dispersion))
+```
+
+```{r results}
+results %>%
+  filter(system != "NOVA (sensitivity)") %>%
+  select(system, label, endpoint, effect, estimate, conf_low, conf_high, p_value, p_adj, p_signif) %>%
+  arrange(endpoint, p_value) %>%
+  print(n = Inf)
+```
+
+
+# Sensitivity analysis
+
+Same models with the foods flagged in the NOVA classification moved to NOVA 1.
+
+```{r sensitivity}
+results %>%
+  filter(str_detect(system, "NOVA"), label %in% label[system == "NOVA (sensitivity)"]) %>%
+  select(system, label, endpoint, estimate, conf_low, conf_high, p_adj) %>%
+  arrange(endpoint, label, system) %>%
+  print(n = Inf)
+```
+
+## Is each score an axis of its own, or the diet-group gradient restated?
+
+How much of each score the diet group already explains (R² of score ~ diet group). This decides which scores
+can be adjusted for diet group: only those the groups do not define.
+
+```{r collinearity with diet group}
+diet_collinearity <- score_info %>%
+  filter(system != "NOVA (sensitivity)") %>%
+  mutate(r2_diet_group = map_dbl(score, ~ summary(lm(analysis_data[[.x]] ~ analysis_data$diet_group))$r.squared),
+         vif = 1 / (1 - r2_diet_group),
+         vegans_at_zero = map_dbl(score, ~ mean(analysis_data[[.x]][analysis_data$diet_group == "Vegan"] == 0)))
+diet_collinearity %>% select(system, label, r2_diet_group, vif, vegans_at_zero) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 2)))
+```
+
+NOVA models are refitted adding the diet group; all models are refitted adding total intake.
+
+```{r sensitivity models}
+sensitivity <- expand_grid(score_info %>% filter(system != "NOVA (sensitivity)"), outcomes) %>%
+  mutate(diet_adjusted = pmap(list(score, outcome, family, system),
+                              function(score, outcome, family, system) {
+                                if (system == "NOVA") fit_score_model(score, outcome, family, extra = "+ diet_group")
+                                else tibble(estimate = NA_real_, p_value = NA_real_)
+                              }),
+         intake_adjusted = pmap(list(score, outcome, family), fit_score_model, extra = "+ total_intake_z")) %>%
+  transmute(system, score, label, endpoint, family,
+            estimate_diet_adjusted = map_dbl(diet_adjusted, "estimate"),
+            p_diet_adjusted = map_dbl(diet_adjusted, "p_value"),
+            estimate_intake_adjusted = map_dbl(intake_adjusted, "estimate"),
+            p_intake_adjusted = map_dbl(intake_adjusted, "p_value")) %>%
+  mutate(across(starts_with("estimate_"), ~ if_else(family == "poisson", exp(.x), .x))) %>%
+  select(-family)
+
+results <- results %>%
+  left_join(sensitivity %>% select(-system, -label), by = c("score", "endpoint"))
+
+results %>%
+  filter(system != "NOVA (sensitivity)", p_adj < 0.05) %>%
+  select(system, label, endpoint, estimate, p_adj,
+         estimate_diet_adjusted, p_diet_adjusted, estimate_intake_adjusted, p_intake_adjusted) %>%
+  mutate(across(where(is.numeric), ~ signif(.x, 3))) %>%
+  arrange(endpoint, p_adj) %>%
+  print(n = Inf)
+```
+
+Total intake itself, as a reference: does eating more of anything predict the resistome?
+
+```{r total intake}
+map_dfr(seq_len(nrow(outcomes)), function(i) {
+  fit <- glm(as.formula(paste(outcomes$outcome[i], "~ scale(total_intake) +", covariates)),
+             data = analysis_data, family = outcomes$family[i])
+  tidy(fit) %>% filter(str_detect(term, "total_intake")) %>%
+    transmute(endpoint = outcomes$endpoint[i], estimate, p_value = p.value)
+})
+
+cat("Total intake by diet group (Kruskal p =",
+    signif(kruskal.test(total_intake ~ diet_group, analysis_data)$p.value, 3), "):\n")
+analysis_data %>% group_by(diet_group) %>% summarise(median_total_intake = median(total_intake))
+```
+
+## Correlation between the scores
+
+The ten scores are not independent exposures: origin and NOVA partition the same questionnaire, and the
+omnivore-to-vegan gradient moves several of them together.
+
+```{r score correlations}
+score_correlations <- analysis_data %>%
+  select(all_of(c(origin_scores, nova_scores))) %>%
+  cor(method = "spearman") %>%
+  as_tibble(rownames = "score")
+
+score_correlations %>% mutate(across(where(is.numeric), ~ round(.x, 2))) %>% print(n = Inf, width = Inf)
+```
+
+
+# Forest plot
+
+```{r forest plot, fig.width = 10, fig.height = 5}
+plot_data <- results %>%
+  filter(system != "NOVA (sensitivity)") %>%
+  mutate(system = factor(system, levels = names(system_colors)),
+         label = fct_rev(fct_inorder(label)),
+         endpoint = factor(endpoint, levels = outcomes$endpoint),
+         null_value = if_else(effect == "IRR", 1, 0))
+
+plot_associations <- ggplot(plot_data, aes(x = estimate, y = label, colour = system)) +
+  geom_vline(aes(xintercept = null_value), linetype = "dashed", colour = "grey50") +
+  geom_errorbar(aes(xmin = conf_low, xmax = conf_high), width = 0.2, orientation = "y") +
+  geom_point(aes(shape = p_adj < 0.05), size = 2.5) +
+  scale_shape_manual(values = c(`FALSE` = 1, `TRUE` = 16), labels = c("q ≥ 0.05", "q < 0.05"), name = NULL) +
+  scale_colour_manual(values = system_colors, name = "Classification") +
+  facet_grid(system ~ endpoint, scales = "free", space = "free_y") +
+  labs(x = "Effect per 1-SD increase (beta; IRR for richness)", y = NULL)
+
+plot_associations
+```
+
+
+# Save
+
+```{r save}
+write_tsv(results %>% select(-family), file.path(table_dir, "score_associations.tsv"))
+write_tsv(score_correlations, file.path(table_dir, "score_correlations.tsv"))
+write_tsv(diet_collinearity %>% select(system, score, label, r2_diet_group, vif, vegans_at_zero),
+          file.path(table_dir, "score_diet_group_collinearity.tsv"))
+
+ggsave(file.path(plot_dir, "Score_associations.png"), plot_associations, width = 10, height = 5, dpi = 600, bg = "white")
+```

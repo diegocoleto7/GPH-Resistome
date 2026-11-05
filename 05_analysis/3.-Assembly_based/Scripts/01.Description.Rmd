@@ -1,0 +1,1300 @@
+---
+title: "01.Description"
+author: "Diego Coleto"
+date: "2026-07-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(here)
+library(ggpattern)
+```
+
+```{r theme plot}
+diet_colors <- c(
+  "Omnivore"   = "#2864A5",
+  "Vegetarian" = "#9C3F90",
+  "Vegan"      = "#B36B32")
+
+element_colors <- c(
+  "Plasmid"                 = "#0F4C81",
+  "Prophage"                = "#765D9A",
+  "Viral sequence"          = "#2D6A8A",
+  "Insertion sequence"      = "#A23E48",
+  "Integron"                = "#4C956C",
+  "Conjugative integron"    = "#789447",
+  "Direct repeat element"   = "#E0A458",
+  "Inverted repeat element" = "#C46D4A",
+  "Compositional outlier"   = "#6B6D76",
+  "No element annotation"   = "#B8B8B8")
+
+theme_set(
+  theme_minimal(base_size = 10) +
+    theme(
+      plot.title = element_text(face = "bold", size = 11),
+      plot.subtitle = element_text(size = 9, color = "grey30"),
+      plot.title.position = "plot",
+      panel.grid.minor = element_blank(),
+      legend.position = "bottom",
+      legend.title = element_blank(),
+      strip.text = element_text(face = "bold", size = 9)))
+
+dir.create(here("3.-Assembly_based","Results","Plots"), recursive = TRUE, showWarnings = FALSE)
+dir.create(here("3.-Assembly_based","Results","Tables"), recursive = TRUE, showWarnings = FALSE)
+```
+
+
+# Load data
+
+```{r load data}
+metadata <- read_tsv(here("Data", "Processed", "metadata.tsv"), show_col_types = FALSE) %>%
+  select(sample_id, diet_group)
+contig_master <- read_tsv(here("Data", "Processed", "contig_master.tsv"), show_col_types = FALSE) %>%
+  left_join(metadata, by = "sample_id") %>% filter(!is.na(species))
+contig_mge <- read_tsv(here("Data", "Processed", "contig_mge.tsv"), show_col_types = FALSE)
+```
+
+# Description
+
+```{r}
+contig_elements <- contig_master %>%
+  distinct(sample_id, contig_id, diet_group, genus, species, is_plasmid) %>%
+  left_join(contig_mge %>% distinct(sample_id, contig_id, element_type),
+            by = c("sample_id", "contig_id")) %>%
+group_by(sample_id, contig_id, diet_group, genus, species) %>%
+  summarise(plasmid = any(is_plasmid %in% TRUE),
+            prophage = any(element_type == "prophage", na.rm = TRUE),
+            direct_repeat_element = any(element_type == "direct_repeat_element",na.rm = TRUE),
+            compositional_outlier = any(element_type == "compositional_outlier",na.rm = TRUE),
+            inverted_repeat_element = any(element_type == "inverted_repeat_element",na.rm = TRUE),
+            viral_sequence = any(element_type == "viral_sequence",na.rm = TRUE),
+            insertion_sequence = any(element_type == "insertion_sequence",na.rm = TRUE),
+            conjugative_integron = any(element_type == "conjugative_integron",na.rm = TRUE),
+            integron = any(element_type == "integron",na.rm = TRUE),
+            no_element_annotation = all(is.na(element_type) & !any(is_plasmid %in% TRUE)),
+            .groups = "drop")
+
+total_contigs <- nrow(contig_elements)
+element_summary <- contig_elements %>%
+  summarise(Plasmid = sum(plasmid),
+            Prophage = sum(prophage),
+            `Direct repeat element` = sum(direct_repeat_element),
+            `Compositional outlier` = sum(compositional_outlier),
+            `Inverted repeat element` = sum(inverted_repeat_element),
+            `Viral sequence` = sum(viral_sequence),
+            `Insertion sequence` = sum(insertion_sequence),
+            `Conjugative integron` = sum(conjugative_integron),
+            Integron = sum(integron),
+            `No element annotation` = sum(no_element_annotation)) %>%
+  pivot_longer(cols = everything(),
+               names_to = "element_type",
+               values_to = "n_contigs") %>%
+  mutate(percentage = n_contigs / total_contigs * 100) %>%
+  arrange(desc(percentage))
+
+element_summary
+
+cat("Number of ARG-containing contigs:", total_contigs, "\n\n")
+
+element_summary %>%
+  mutate(output = paste0(element_type,
+                         ": ",
+                         n_contigs,
+                         " contigs (",
+                         round(percentage, 2),
+                         "%)")) %>%
+  pull(output) %>%
+  cat(sep = "\n")
+```
+
+
+```{r element types}
+plot_element_types <- element_summary %>%
+  mutate(element_type = fct_reorder(element_type,
+                                    percentage)) %>%
+  ggplot(aes(x = element_type,
+             y = percentage,
+             fill = element_type)) +
+  geom_col(width = 0.72,
+           colour = "black",
+           linewidth = 0.35) +
+  geom_text(aes(label = paste0(round(percentage, 1),
+                               "%  (n = ",
+                               scales::comma(n_contigs),
+                               ")")),
+            hjust = -0.08,
+            size = 3.2,
+            fontface = "bold") +
+  coord_flip() +
+  scale_fill_manual(values = element_colors, name = "Mobile element") +
+  scale_y_continuous(labels = scales::label_percent(scale = 1,
+                                                    accuracy = 1),
+                     expand = expansion(mult = c(0, 0.25))) +
+  labs(x = NULL,
+       y = "% of total ARG-contigs") +
+  theme_bw(base_size = 10) +
+  theme(axis.text.y = element_text(size = 9),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold", size = 9),
+        legend.text = element_text(size = 8),
+        legend.key.size = unit(0.35, "cm"),
+        legend.spacing.x = grid::unit(0.08, "cm")) +
+  guides(fill = guide_legend(nrow = 3,
+                             byrow = TRUE))
+
+plot_element_types
+```
+
+
+
+```{r}
+n_species_level <- nrow(contig_master %>% filter(!is.na(species)) %>% distinct(sample_id, contig_id))
+n_distinct_species <- n_distinct(contig_master$species, na.rm = TRUE)
+n_distinct_genus <- contig_master %>% filter(!is.na(species)) %>% summarize(
+  n= n_distinct(contig_master$genus, na.rm = TRUE)) %>% pull(n)
+cat("Number of species-level contigs:", n_species_level,"\n")
+cat("Diferent species identified:", n_distinct_species,"\n")
+cat("Diferent genus identified:", n_distinct_genus,"\n")
+```
+
+```{r mobilome species}
+contig_species <- contig_elements %>%
+  distinct(sample_id,
+           contig_id,
+           species,
+           .keep_all = TRUE) %>%
+  #filter(!is.na(species)) %>%
+  group_by(species) %>%
+  summarise(n_contigs = n(),
+            n_mbe = sum(!no_element_annotation,na.rm = TRUE),
+            .groups = "drop") %>%
+  mutate(percentage_mbe = n_mbe / n_contigs * 100) %>%
+  slice_max(order_by = n_contigs,
+            n = 10,
+            with_ties = FALSE) %>%
+  arrange(desc(n_contigs))
+
+top15_species <- contig_species$species
+
+
+# ------------------------------------------------------------
+# 2. Count each mobile-element annotation by species
+#
+# The categories are counted independently because a contig
+# can contain more than one type of mobile-element annotation.
+# ------------------------------------------------------------
+
+contig_species_elements <- contig_elements %>%
+  filter(
+    !is.na(species),
+    species %in% top15_species
+  ) %>%
+
+  group_by(species) %>%
+
+  summarise(
+    Plasmid = sum(
+      plasmid,
+      na.rm = TRUE
+    ),
+
+    Prophage = sum(
+      prophage,
+      na.rm = TRUE
+    ),
+
+    `Viral sequence` = sum(
+      viral_sequence,
+      na.rm = TRUE
+    ),
+
+    `Insertion sequence` = sum(
+      insertion_sequence,
+      na.rm = TRUE
+    ),
+
+    Integron = sum(
+      integron,
+      na.rm = TRUE
+    ),
+
+    `Conjugative integron` = sum(
+      conjugative_integron,
+      na.rm = TRUE
+    ),
+
+    `Direct repeat element` = sum(
+      direct_repeat_element,
+      na.rm = TRUE
+    ),
+
+    `Inverted repeat element` = sum(
+      inverted_repeat_element,
+      na.rm = TRUE
+    ),
+
+    `Compositional outlier` = sum(
+      compositional_outlier,
+      na.rm = TRUE
+    ),
+
+    .groups = "drop"
+  ) %>%
+
+  pivot_longer(
+    cols = -species,
+    names_to = "element_type",
+    values_to = "n_element_contigs"
+  ) %>%
+
+  mutate(
+    element_type = factor(
+      element_type,
+      levels = names(element_colors)
+    )
+  )
+
+
+# ------------------------------------------------------------
+# 3. Set the species order
+#
+# With coord_flip(), the last factor level appears at the top.
+# ------------------------------------------------------------
+
+species_levels <- contig_species %>%
+  arrange(n_contigs) %>%
+  pull(species)
+
+
+contig_species <- contig_species %>%
+  mutate(
+    species = factor(species,
+                     levels = species_levels))
+
+```
+
+
+```{r}
+library(tidyverse)
+library(patchwork)
+
+# ============================================================
+# Prepare data
+# ============================================================
+
+species_levels <- contig_species %>%
+  arrange(n_contigs) %>%
+  pull(species)
+
+contig_species_plot <- contig_species %>%
+  mutate(
+    species = factor(
+      species,
+      levels = species_levels
+    )
+  )
+
+contig_species_elements_plot <- contig_species_elements %>%
+  filter(
+    element_type != "No element annotation",
+    n_element_contigs > 0
+  ) %>%
+  mutate(
+    species = factor(
+      species,
+      levels = species_levels
+    ),
+    element_type = factor(
+      element_type,
+      levels = names(element_colors)
+    )
+  )
+
+
+# ============================================================
+# Left side: total ARG-contigs
+# ============================================================
+
+plot_total_contigs <- ggplot(
+  contig_species_plot,
+  aes(
+    y = species,
+    x = n_contigs
+  )
+) +
+
+  # Central axis
+  geom_vline(
+    xintercept = 0,
+    colour = "black",
+    linewidth = 0.5
+  ) +
+
+  geom_col(
+    width = 0.82,
+    fill = "grey85",
+    colour = "grey25",
+    linewidth = 0.35,
+    orientation = "y"
+  ) +
+
+  # Total number of contigs
+  geom_text(
+    aes(
+      x = n_contigs,
+      label = scales::comma(n_contigs)
+    ),
+    hjust = -0.15,
+    size = 3,
+    fontface = "bold",
+    colour = "black"
+  ) +
+
+  # Number and percentage with any MBE annotation
+  geom_col(
+    aes(x = n_mbe),
+    width = 0.46,
+    fill = "grey55",
+    colour = "grey25",
+    linewidth = 0.25,
+    orientation = "y"
+  ) +
+
+  # Makes bars extend towards the left
+  scale_x_reverse(
+    labels = scales::label_number(
+      scale_cut = scales::cut_short_scale()
+    ),
+    expand = expansion(
+      mult = c(0, 0.16)
+    )
+  ) +
+
+  scale_y_discrete(
+    limits = species_levels,
+    drop = FALSE,
+    expand = expansion(add = 0.55)
+  ) +
+
+  coord_cartesian(
+    clip = "off"
+  ) +
+
+  labs(
+    x = "Total ARG-contigs",
+    y = NULL
+  ) +
+
+  theme_bw(base_size = 10) +
+
+  theme(
+    axis.text.y = element_text(
+      face = "italic",
+      size = 9
+    ),
+    axis.ticks.y = element_blank(),
+
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+
+    axis.title.x = element_text(
+      face = "bold",
+      size = 9
+    ),
+
+    legend.position = "none",
+
+    # No margin on the side touching the other plot
+    plot.margin = margin(
+      t = 5.5,
+      r = 0,
+      b = 5.5,
+      l = 5.5
+    )
+  )
+
+
+# ============================================================
+# Right side: mobile-element annotation counts
+# ============================================================
+
+plot_mobile_elements <- ggplot(
+  contig_species_elements_plot,
+  aes(
+    y = species,
+    x = n_element_contigs,
+    fill = element_type,
+    group = element_type
+  )
+) +
+
+  # Central axis
+  geom_vline(
+    xintercept = 0,
+    colour = "black",
+    linewidth = 0.5
+  ) +
+
+  geom_col(
+    position = position_dodge2(
+      width = 0.90,
+      preserve = "single",
+      padding = 0.04
+    ),
+    width = 0.82,
+    colour = "grey20",
+    linewidth = 0.15,
+    orientation = "y"
+  ) +
+
+  scale_fill_manual(
+    name = "Mobile element",
+    values = element_colors[
+      names(element_colors) != "No element annotation"
+    ],
+    drop = TRUE
+  ) +
+
+  scale_x_continuous(
+    labels = scales::label_number(
+      scale_cut = scales::cut_short_scale()
+    ),
+    expand = expansion(
+      mult = c(0, 0.12)
+    )
+  ) +
+
+  scale_y_discrete(
+    limits = species_levels,
+    drop = FALSE,
+    expand = expansion(add = 0.55)
+  ) +
+
+  labs(
+    x = "Mobile-element annotations",
+    y = NULL
+  ) +
+
+  theme_bw(base_size = 10) +
+
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+
+    axis.title.x = element_text(
+      face = "bold",
+      size = 9
+    ),
+
+    legend.position = "bottom",
+    legend.title = element_text(
+      face = "bold",
+      size = 9
+    ),
+    legend.text = element_text(
+      size = 7.5
+    ),
+    legend.key.size = grid::unit(
+      0.3,
+      "cm"
+    ),
+    legend.spacing.x = grid::unit(
+      0.08,
+      "cm"
+    ),
+
+    # No margin on the side touching the other plot
+    plot.margin = margin(
+      t = 5.5,
+      r = 5.5,
+      b = 5.5,
+      l = 0
+    )
+  ) +
+
+  guides(
+    fill = guide_legend(
+      nrow = 2,
+      byrow = TRUE,
+      override.aes = list(
+        colour = "grey20",
+        linewidth = 0.25
+      )
+    )
+  )
+
+
+# ============================================================
+# Join both sides at the central zero axis
+# ============================================================
+
+plot_contig_species_mirrored <- (
+  plot_total_contigs |
+    plot_mobile_elements) +
+  plot_layout(
+    widths = c(1, 1.35),
+    guides = "collect"
+  ) +
+  theme(
+    legend.position = "bottom"
+  )
+
+
+plot_contig_species_mirrored
+```
+
+```{r}
+library(viridis)
+
+
+contig_gene_species <- contig_master %>%
+  filter(!is.na(AMR_gene),
+         AMR_gene != "",
+         !is.na(species),
+         species != "") %>%
+  distinct(sample_id,
+           contig_id,
+           AMR_gene,
+           species,
+           genus) %>%
+  rename(gene = AMR_gene)
+
+
+gene_abundance <- contig_gene_species %>%
+  group_by(gene) %>%
+  summarise(n_contigs = n_distinct(interaction(sample_id,
+                                               contig_id,
+                                               drop = TRUE)),
+            .groups = "drop") %>%
+  arrange(desc(n_contigs))
+
+
+
+```
+
+```{r}
+
+top15_genes <- gene_abundance %>%
+  slice_max(order_by = n_contigs,
+            n = 15,
+            with_ties = FALSE) %>%
+  arrange(desc(n_contigs))
+
+top15_gene_names <- top15_genes$gene
+
+top15_gene_genus <- contig_gene_species %>%
+  filter(gene %in% top15_gene_names) %>%
+  group_by(gene, genus) %>%
+  summarise(n_contigs_genus = n_distinct(interaction(sample_id,
+                                                     contig_id,
+                                                     drop = TRUE)),
+            .groups = "drop")
+
+gene_levels <- rev(top15_gene_names)
+
+top15_gene_genus <- top15_gene_genus %>%
+  mutate(gene = factor(gene,
+                       levels = gene_levels))
+
+top15_genes <- top15_genes %>%
+  mutate(gene = factor(gene,
+                       levels = gene_levels))
+```
+
+```{r}
+
+library(randomcoloR)
+
+# Géneros que realmente aparecen en la figura
+genus_levels <- top15_gene_genus %>%
+  filter(n_contigs_genus > 2) %>%
+  distinct(genus) %>%
+  arrange(genus) %>%
+  pull(genus)
+
+# Paleta cualitativa discreta y apagada
+set.seed(1)
+genus_colors <- setNames(
+  distinctColorPalette(
+    length(genus_levels)
+  ),
+  genus_levels
+)
+print(genus_colors)
+plot_top15_gene_genus <- ggplot(top15_gene_genus %>%
+                                  filter(n_contigs_genus > 2),
+                                aes(x = gene,
+                                    y = n_contigs_genus,
+                                    fill = genus)) +
+  geom_col(width = 0.72,
+           colour = "white",
+           linewidth = 0.15) +
+  geom_text(data = top15_genes, aes(x = gene,
+                                    y = n_contigs,
+                                    label = scales::comma(n_contigs)),
+            inherit.aes = FALSE,
+            hjust = -0.15,
+            size = 3,
+            fontface = "bold",
+            colour = "black") +
+  coord_flip(clip = "off") +
+  scale_fill_manual(
+    name = "Genus",
+    values = genus_colors,
+    breaks = genus_levels,
+    drop = TRUE) +
+  scale_y_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale()),
+                   expand = expansion(mult = c(0, 0.14))) +
+  labs(x = NULL,
+       y = "ARG hits") +
+
+  theme_bw(base_size = 10) +
+
+  theme(axis.text.y = element_text(face = "italic",
+                                   size = 9),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = "right",
+        legend.title = element_text(face = "bold"),
+    legend.text = element_text(face = "italic",
+                               size = 6)
+  )
+
+
+plot_top15_gene_genus
+```
+
+```{r}
+ggsave(here("3.-Assembly_based", "Results", "Plots", "Top_gene_genus.png"), plot_top15_gene_genus, width = 10, height = 5, dpi = 600)
+ggsave(here("3.-Assembly_based", "Results", "Plots", "Element_types.png"), plot_element_types, width = 7.5, height = 5, dpi = 600)
+ggsave(here("3.-Assembly_based", "Results", "Plots", "Species_mbe_mirrored.png"), plot_contig_species_mirrored, width = 10, height = 5, dpi = 600)
+
+plot_element_types
+```
+
+```{r}
+# Agathobacter           Akkermansia             Alistipes       Allocoprococcus         Anaerotruncus              Bacillus           Bacteroides           Barnesiella 
+#             "#59E7B5"             "#E7CA86"             "#8EA8E9"             "#90C853"             "#AEE9A7"             "#8443D8"             "#5FA06B"             "#A47E75" 
+#       Bifidobacterium             Bilophila               Blautia         Butyricimonas         Campylobacter       Christensenella         Claveliimonas        Clostridioides 
+#             "#6961DD"             "#6BCEE4"             "#D75A4D"             "#B2B384"             "#A139A6"             "#A48BE8"             "#53A2D5"             "#F0923E" 
+#           Clostridium         Desulfovibrio             Dialister                 Dorea         Dysosmobacter         Enterocloster          Enterococcus          Eshraghiella 
+#             "#EC53B5"             "#AFC0B2"             "#EBD2BE"             "#A74C8C"             "#BA6AE7"             "#D6E94E"             "#DFECE9"             "#907F9D" 
+#      Faecalibacterium        Flavonifractor            Holdemania           Lachnospira         Lawsonibacter    Mediterraneibacter             Megamonas           Megasphaera 
+#             "#EE4BE1"             "#5878DF"             "#DFEBC3"             "#ACC8E5"             "#E3D5E4"             "#A78B3B"             "#6AF2ED"             "#68CDB7" 
+#   Novisyntrophococcus       Owariibacterium       Parabacteroides    Peptostreptococcus            Petrimonas Phascolarctobacterium           Phocaeicola            Prevotella 
+#             "#DBEC90"             "#B1EBDA"             "#685BA4"             "#E083DF"             "#BE36F1"             "#6733F2"             "#C59FE3"             "#5B9696" 
+#  Pseudoflavonifractor            Riemerella             Roseburia          Ruminococcus             Segatella        Staphylococcus         Streptococcus           Trueperella 
+#             "#DF3A70"             "#E498CB"             "#E0AFBB"             "#6EE88E"             "#E99C7E"             "#76EC51"             "#E17391"             "#DCC0ED" 
+#            Vescimonas 
+#             "#E4C84C" 
+```
+
+```{r}
+# ============================================================
+# ARG gene richness within species and samples
+# ============================================================
+
+# One row per sample, species and distinct ARG gene
+sample_species_genes <- contig_gene_species %>%
+  distinct(
+    sample_id,
+    species,
+    genus,
+    gene
+  ) %>%
+  left_join(
+    metadata,
+    by = "sample_id"
+  )
+
+
+# Number of distinct ARG genes carried by each species
+# within each individual sample
+sample_species_ARG_richness <- sample_species_genes %>%
+  group_by(
+    sample_id,
+    diet_group,
+    species,
+    genus
+  ) %>%
+  summarise(
+    n_distinct_ARG = n_distinct(gene),
+    ARG_profile = paste(
+      sort(unique(gene)),
+      collapse = " + "
+    ),
+    .groups = "drop"
+  )
+
+
+# ============================================================
+# Rank species according to within-sample ARG gene richness
+# ============================================================
+
+species_ARG_richness_summary <- sample_species_ARG_richness %>%
+  group_by(
+    species,
+    genus
+  ) %>%
+  summarise(
+    n_samples = n_distinct(sample_id),
+    mean_n_ARG = mean(
+      n_distinct_ARG,
+      na.rm = TRUE
+    ),
+    median_n_ARG = median(
+      n_distinct_ARG,
+      na.rm = TRUE
+    ),
+    maximum_n_ARG = max(
+      n_distinct_ARG,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  ) %>%
+
+  # Avoid ranking species represented by only one or two samples
+  filter(n_samples >= 3) %>%
+
+  arrange(
+    desc(maximum_n_ARG),
+    desc(mean_n_ARG),
+    desc(n_samples)
+  )
+
+
+# Select the 15 species with the highest within-sample
+# ARG gene richness
+top15_species_ARG_richness <- species_ARG_richness_summary %>%
+  slice_head(n = 15)
+
+top15_species_ARG_names <- top15_species_ARG_richness$species
+
+
+# Order species for plotting
+species_ARG_levels <- top15_species_ARG_richness %>%
+  arrange(
+    mean_n_ARG,
+    maximum_n_ARG
+  ) %>%
+  pull(species)
+
+
+sample_species_ARG_plot <- sample_species_ARG_richness %>%
+  filter(
+    species %in% top15_species_ARG_names
+  ) %>%
+  mutate(
+    species = factor(
+      species,
+      levels = species_ARG_levels
+    ),
+    diet_group = factor(
+      diet_group,
+      levels = names(diet_colors)
+    )
+  )
+
+
+species_ARG_labels <- top15_species_ARG_richness %>%
+  mutate(
+    species = factor(
+      species,
+      levels = species_ARG_levels
+    )
+  )
+
+
+# ============================================================
+# Plot 1: within-sample ARG gene richness by species
+# ============================================================
+
+plot_species_ARG_richness <- ggplot(
+  sample_species_ARG_plot,
+  aes(
+    x = species,
+    y = n_distinct_ARG
+  )
+) +
+
+  geom_boxplot(
+    outlier.shape = NA,
+    width = 0.68,
+    fill = "grey90",
+    colour = "grey25",
+    linewidth = 0.7
+  ) +
+
+  # Each point represents one species within one sample
+  geom_jitter(
+    aes(fill = diet_group),
+    shape = 21,
+    colour = "black",
+    width = 0.17,
+    height = 0,
+    size = 1.8,
+    alpha = 0.6
+  ) +
+
+  # Maximum observed value and number of samples
+  geom_text(
+    data = species_ARG_labels,
+    aes(
+      x = species,
+      y = maximum_n_ARG,
+      label = paste0(
+        "max = ",
+        maximum_n_ARG,
+        "; n = ",
+        n_samples
+      )
+    ),
+    inherit.aes = FALSE,
+    hjust = -0.12,
+    size = 2.7,
+    fontface = "bold",
+    colour = "black"
+  ) +
+
+  coord_flip(
+    clip = "off"
+  ) +
+
+  scale_fill_manual(
+    name = "Diet group",
+    values = diet_colors,
+    drop = FALSE
+  ) +
+
+  scale_y_continuous(
+    breaks = scales::breaks_pretty(n = 6),
+    expand = expansion(
+      mult = c(0.03, 0.28)
+    )
+  ) +
+
+  labs(
+    title = "Within-sample ARG gene richness by bacterial species",
+    subtitle = paste0(
+      "Each point represents the number of distinct ARG genes ",
+      "assigned to a species within one individual sample."
+    ),
+    x = NULL,
+    y = "Distinct ARG genes per species and sample"
+  ) +
+
+  theme_bw(base_size = 10) +
+
+  theme(
+    axis.text.y = element_text(
+      face = "italic",
+      size = 8.5
+    ),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom",
+    legend.title = element_text(
+      face = "bold",
+      size = 9
+    ),
+    legend.text = element_text(
+      size = 8
+    )
+  )
+
+
+plot_species_ARG_richness
+
+
+```
+```{r}
+
+# ============================================================
+# ARG combinations located on the same contig
+# ============================================================
+
+# One row per contig, containing its complete combination
+# of distinct ARG genes
+contig_ARG_combinations <- contig_gene_species %>%
+  group_by(
+    sample_id,
+    contig_id,
+    species,
+    genus
+  ) %>%
+  summarise(
+    n_distinct_ARG = n_distinct(gene),
+    ARG_combination = paste(
+      sort(unique(gene)),
+      collapse = " + "
+    ),
+    .groups = "drop"
+  ) %>%
+
+  # Keep contigs carrying at least two distinct ARG genes
+  filter(n_distinct_ARG >= 2) %>%
+
+  mutate(
+    combination_size = case_when(
+      n_distinct_ARG == 2 ~ "2 ARG genes",
+      n_distinct_ARG == 3 ~ "3 ARG genes",
+      n_distinct_ARG >= 4 ~ "≥4 ARG genes"
+    ),
+    combination_size = factor(
+      combination_size,
+      levels = c(
+        "2 ARG genes",
+        "3 ARG genes",
+        "≥4 ARG genes"
+      )
+    )
+  )
+
+
+# ============================================================
+# Global frequency of each same-contig ARG combination
+# ============================================================
+
+ARG_combination_summary <- contig_ARG_combinations %>%
+  group_by(
+    ARG_combination,
+    n_distinct_ARG,
+    combination_size
+  ) %>%
+  summarise(
+    n_contigs = n(),
+    n_samples = n_distinct(sample_id),
+    n_species = n_distinct(species),
+    .groups = "drop"
+  ) %>%
+  arrange(
+    desc(n_contigs),
+    desc(n_samples),
+    desc(n_distinct_ARG)
+  )
+
+
+# Select the 20 most frequent combinations
+top20_ARG_combinations <- ARG_combination_summary %>%
+  filter(
+    (n_distinct_ARG == 2 & n_contigs >= 3) |
+    (n_distinct_ARG == 3 & n_contigs >= 2) |
+    n_distinct_ARG >= 4
+  ) %>%
+
+  mutate(
+    combination_label = paste0(
+      stringr::str_wrap(
+        ARG_combination,
+        width = 50
+      ),
+      "\n",
+      "n = ",
+      n_contigs,
+      " contigs: ",
+      n_samples,
+      " samples"
+    )
+  )
+
+
+# ============================================================
+# Count the bacteria associated with each combination
+# ============================================================
+
+ARG_combination_species <- contig_ARG_combinations %>%
+  semi_join(
+    top20_ARG_combinations,
+    by = c(
+      "ARG_combination",
+      "n_distinct_ARG",
+      "combination_size"
+    )
+  ) %>%
+
+  group_by(
+    ARG_combination,
+    n_distinct_ARG,
+    combination_size,
+    species,
+    genus
+  ) %>%
+
+  summarise(
+    n_contigs = n(),
+    n_samples = n_distinct(sample_id),
+    .groups = "drop"
+  ) %>%
+
+  left_join(
+    top20_ARG_combinations %>%
+      select(
+        ARG_combination,
+        n_distinct_ARG,
+        combination_size,
+        combination_label,
+        total_combination_contigs = n_contigs
+      ),
+    by = c(
+      "ARG_combination",
+      "n_distinct_ARG",
+      "combination_size"
+    )
+  )
+
+
+# Order combinations by global abundance
+ARG_combination_levels <- top20_ARG_combinations %>%
+  arrange(
+    n_distinct_ARG,
+    n_contigs
+  ) %>%
+  pull(combination_label)
+
+
+# Order species by the number of multi-ARG contigs
+combination_species_levels <- ARG_combination_species %>%
+  group_by(species) %>%
+  summarise(
+    total_contigs = sum(
+      n_contigs,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(total_contigs)) %>%
+  pull(species)
+
+
+ARG_combination_species <- ARG_combination_species %>%
+  mutate(
+    combination_label = factor(
+      combination_label,
+      levels = ARG_combination_levels
+    ),
+    species = factor(
+      species,
+      levels = combination_species_levels
+    )
+  )
+
+
+# ============================================================
+# Colours according to the number of genes in the combination
+# ============================================================
+
+ARG_combination_colors <- c(
+  "2 ARG genes" = "#2D6A8A",
+  "3 ARG genes" = "#E0A458",
+  "≥4 ARG genes" = "#A23E48"
+)
+
+
+# ============================================================
+# Plot 2: same-contig ARG combinations and bacterial species
+# ============================================================
+
+plot_contig_ARG_combinations <- ggplot(
+  ARG_combination_species,
+  aes(
+    x = species,
+    y = combination_label
+  )
+) +
+
+  geom_point(
+    aes(
+      size = n_contigs,
+      fill = combination_size
+    ),
+    shape = 21,
+    colour = "black",
+    stroke = 0.35,
+    alpha = 0.85
+  ) +
+
+  facet_grid(
+    combination_size ~ .,
+    scales = "free_y",
+    space = "free_y"
+  ) +
+
+  scale_fill_manual(
+    values = ARG_combination_colors,
+    guide = "none",
+    drop = FALSE
+  ) +
+
+  scale_size_continuous(
+    name = "Number of contigs",
+    range = c(2.5, 10),
+    breaks = scales::breaks_pretty(n = 4)
+  ) +
+
+  labs(
+    x = NULL,
+    y = NULL,
+  ) +
+
+  theme_bw(base_size = 10) +
+
+  theme(
+    axis.text.x = element_text(
+      face = "italic",
+      angle = 45,
+      hjust = 1,
+      vjust = 1,
+      size = 8,
+      color = "black"
+    ),
+    axis.text.y = element_text(
+      face = "italic",
+      size = 8.5
+    ),
+    panel.grid.major = element_line(
+      colour = "grey90",
+      linewidth = 0.3
+    ),
+    panel.grid.minor = element_blank(),
+    strip.text.y = element_text(
+      face = "bold",
+      angle = 0,
+      size = 8
+    ),
+    strip.placement = "outside",
+    legend.position = "bottom",
+    legend.title = element_text(
+      face = "bold"
+    )
+  )
+
+
+plot_contig_ARG_combinations
+
+
+
+
+```
+```{r}
+ggsave(
+  filename = here(
+    "3.-Assembly_based",
+    "Results",
+    "Plots",
+    "ARG_combinations_by_species.png"
+  ),
+  plot = plot_contig_ARG_combinations,
+  width = 12,
+  height = 9,
+  dpi = 600,
+  bg = "white"
+)
+```
+
+```{r}
+# ============================================================
+# Combine both plots
+# ============================================================
+
+plot_ARG_richness_and_combinations <- (
+  plot_species_ARG_richness /
+    plot_contig_ARG_combinations
+) +
+  plot_layout(
+    heights = c(1, 1.45)
+  )
+
+
+plot_ARG_richness_and_combinations
+# ============================================================
+# Export tables
+# ============================================================
+
+write_tsv(
+  sample_species_ARG_richness,
+  here(
+    "3.-Assembly_based",
+    "Results",
+    "Tables",
+    "ARG_gene_richness_by_sample_and_species.tsv"
+  )
+)
+
+write_tsv(
+  species_ARG_richness_summary,
+  here(
+    "3.-Assembly_based",
+    "Results",
+    "Tables",
+    "ARG_gene_richness_species_summary.tsv"
+  )
+)
+
+write_tsv(
+  contig_ARG_combinations,
+  here(
+    "3.-Assembly_based",
+    "Results",
+    "Tables",
+    "same_contig_ARG_combinations.tsv"
+  )
+)
+
+write_tsv(
+  ARG_combination_species,
+  here(
+    "3.-Assembly_based",
+    "Results",
+    "Tables",
+    "same_contig_ARG_combinations_by_species.tsv"
+  )
+)
+
+
+# ============================================================
+# Export plots
+# ============================================================
+
+ggsave(
+  filename = here(
+    "3.-Assembly_based",
+    "Results",
+    "Plots",
+    "ARG_gene_richness_by_species.png"
+  ),
+  plot = plot_species_ARG_richness,
+  width = 9,
+  height = 6.5,
+  dpi = 600,
+  bg = "white"
+)
+
+
+
+ggsave(
+  filename = here(
+    "3.-Assembly_based",
+    "Results",
+    "Plots",
+    "ARG_gene_richness_and_same_contig_combinations.png"
+  ),
+  plot = plot_ARG_richness_and_combinations,
+  width = 14,
+  height = 16,
+  dpi = 600,
+  bg = "white"
+)
+```
+

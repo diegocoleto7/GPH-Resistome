@@ -1,0 +1,145 @@
+---
+title: "04.Parse_assembly_based"
+author: "Diego Coleto"
+date: "2026-07-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(here)
+
+# Plasmid annotations on contigs shorter than this are discarded
+min_plasmid_contig_length <- 5000
+```
+
+# Load data
+
+```{r load data}
+metadata <- read_tsv(here("Data", "Processed", "metadata.tsv"), show_col_types = FALSE)
+```
+
+```{r abricate}
+
+read_abricate_file <- function(file) {
+
+  sample_id <- basename(file) %>%
+    str_remove("\\.abricate_.*\\.out$") %>%
+    str_remove("\\.out$")
+
+  x <- read_tsv(file,
+    col_types = cols(.default = col_character()),
+    progress = FALSE)
+
+  if (nrow(x) == 0) {return(tibble())}
+
+  x %>%
+    rename(contig_id = SEQUENCE, start = START, end = END, product = PRODUCT,
+           resistance = RESISTANCE) %>%
+    mutate(sample_id = sample_id,
+           start = as.integer(start),
+           end = as.integer(end),
+           # ResFinder variant name, as in Data/Raw/Phenotypes/phenotypes.tsv (e.g. blaTEM-1B_1_AY458016)
+           variant = paste(GENE, ACCESSION, sep = "_")) %>%
+    select(sample_id, contig_id, start, end, product, variant, resistance)}
+
+```
+
+```{r abricate genes}
+resfinder_files <- list.files(here("Data", "Raw", "Assembly", "Abricate_resfinder"),
+  pattern = "abricate_resfinder\\.out$",
+  full.names = TRUE)
+
+amr_hits <- map_dfr(
+  resfinder_files,
+  read_abricate_file)
+
+amr_hits <- amr_hits %>%
+  transmute(sample_id = sample_id,
+            contig_id = contig_id,
+            AMR_start = start,
+            AMR_end = end,
+            AMR_gene = product,
+            AMR_variant = variant,
+            resistance = resistance) %>%
+  filter(sample_id %in% metadata$sample_id) %>%
+  distinct()
+```
+
+```{r kraken2}
+kraken <- read_tsv(here("Data", "Raw", "Assembly", "Kraken2", "kraken2_all_samples.tsv"),
+                   show_col_types = FALSE,
+                   progress = FALSE) %>%
+  mutate(taxid = str_extract(assigned_taxon,
+                             "(?<=taxid )\\d+"),
+         taxid = as.integer(taxid))  %>%
+  select(sample_id,	contig_id, contig_length, taxid)
+
+taxonkit <- read_tsv(here("Data", "Raw", "Assembly", "Kraken2", "taxonkit_results.tsv"),
+                   show_col_types = FALSE,
+                   progress = FALSE,
+                   col_names = c("taxid",
+                                 "domain",
+                                 "phylum",
+                                 "class",
+                                 "order",
+                                 "family",
+                                 "genus",
+                                 "species"))
+kraken <- kraken %>%
+  left_join(taxonkit %>% select(taxid, genus, species), by = "taxid")
+
+```
+
+```{r map}
+map <- read_tsv(here("Data", "Raw", "Assembly", "MAP", "MAP_all_mobilome_annotations.tsv"),
+                   show_col_types = FALSE,
+                   progress = FALSE) %>%
+  transmute(sample_id = sample_id,
+            contig_id = contig_id,
+            annotation_source = annotation_source,
+            element_type = feature_type,
+            element_start = start,
+            element_end = end) %>%
+  left_join(kraken %>% select(sample_id, contig_id, contig_length),
+            by = c("sample_id", "contig_id")) %>%
+  filter(!(element_type == "plasmid" & contig_length < min_plasmid_contig_length)) %>%
+  distinct()
+```
+
+# Contig Master
+
+One row per AMR hit. MGE information comes only from MAP and is summarised per contig.
+
+```{r contig master}
+contig_mge <- map %>%
+  semi_join(amr_hits, by = c("sample_id", "contig_id")) %>%
+  select(-contig_length) %>%
+  arrange(sample_id, contig_id, element_start)
+
+mge_by_contig <- contig_mge %>%
+  group_by(sample_id, contig_id) %>%
+  summarise(is_plasmid = any(element_type == "plasmid"),
+            element_types = str_c(sort(unique(element_type)), collapse = ";"),
+            .groups = "drop")
+
+contig_master <- amr_hits %>%
+  left_join(kraken, by = c("sample_id", "contig_id")) %>%
+  left_join(mge_by_contig, by = c("sample_id", "contig_id")) %>%
+  mutate(has_mobile_element = !is.na(element_types),
+         is_plasmid = replace_na(is_plasmid, FALSE)) %>%
+  relocate(contig_length, .after = contig_id)
+
+cat("AMR hits:", nrow(contig_master),
+    "| contigs:", nrow(distinct(contig_master, sample_id, contig_id)),
+    "| without Kraken2 length:", sum(is.na(contig_master$contig_length)), "\n")
+```
+
+```{r save}
+write_tsv(contig_master, here("Data", "Processed", "contig_master.tsv"))
+write_tsv(contig_mge, here("Data", "Processed", "contig_mge.tsv"))
+```

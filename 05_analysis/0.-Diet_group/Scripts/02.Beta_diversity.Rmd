@@ -1,0 +1,294 @@
+---
+title: "02.-ARG_beta_diversity"
+author: "Diego Coleto"
+date: "2026-07-15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(here)
+library(vegan)
+library(ggpubr)
+
+set.seed(1)
+```
+
+
+# Set plot themes
+
+```{r theme plot}
+diet_colors <- c(
+  "Omnivore"   = "#2864A5",
+  "Vegetarian" = "#9C3F90",
+  "Vegan"      = "#B36B32")
+
+theme_set(
+  theme_minimal(base_size = 10) +
+    theme(
+      plot.title = element_text(face = "bold", size = 11),
+      plot.subtitle = element_text(size = 9, color = "grey30"),
+      plot.title.position = "plot",
+      panel.grid.minor = element_blank(),
+      legend.position = "bottom",
+      legend.title = element_blank(),
+      strip.text = element_text(face = "bold", size = 9)))
+
+```
+
+
+# Load data
+
+```{r load data}
+metadata <- read_tsv(here("Data", "Processed", "metadata.tsv"), show_col_types = FALSE) %>%
+  mutate(log10_depth = log10(reads),
+         diet_group = factor(diet_group, levels = c("Omnivore", "Vegetarian", "Vegan")))
+cpm <- read_tsv(here("Data", "Processed", "cpm_gene_GPH.tsv"), show_col_types = FALSE) %>% column_to_rownames(var = "gene_family") %>%
+  t() %>% as.data.frame() %>% rownames_to_column(var= "sample_id")
+```
+
+# Function
+
+```{r PCoA}
+run_pcoa <- function(distance_object, metadata_df) {
+  
+  pcoa <- wcmdscale(distance_object, k = 2, eig = TRUE, add = "lingoes")
+  
+  points <- as.data.frame(pcoa$points)
+  colnames(points) <- c("PC1", "PC2")
+  
+  eigs <- pcoa$eig
+  positive_eigs <- eigs[eigs > 0]
+  var_exp <- positive_eigs / sum(positive_eigs)
+  
+  pcoa_df <- bind_cols(metadata_df, points)
+  
+  list(pcoa = pcoa,
+       points = pcoa_df,
+       var_exp = var_exp)}
+
+# Complete cases only (GPH_97 has no BMI), so PERMANOVA and betadisper use the same samples
+complete_cases <- function(distance_object, metadata_df) {
+  model_df <- metadata_df %>%
+    filter(if_all(c(diet_group, sex, age, bmi, log10_depth), ~ !is.na(.x)))
+  list(model_df = model_df,
+       distance = as.dist(as.matrix(distance_object)[model_df$sample_id, model_df$sample_id]))}
+
+# PERMANOVA with the project covariates
+run_adonis <- function(distance_object, metadata_df) {
+  cc <- complete_cases(distance_object, metadata_df)
+
+  adonis2(
+    cc$distance ~ diet_group + sex + age + bmi + log10_depth,
+    data = cc$model_df,
+    permutations = 9999,
+    by = "margin")}
+
+run_betadisper <- function(distance_object, metadata_df) {
+  cc <- complete_cases(distance_object, metadata_df)
+  betadisper(cc$distance, cc$model_df$diet_group, type = "median", bias.adjust = TRUE)}
+```
+
+
+# PCoA
+```{r to matrix}
+arg_mat <- cpm %>%
+  select(-sample_id) %>%
+  as.matrix() %>%
+  apply(2,as.numeric)
+
+rownames(arg_mat) <- cpm$sample_id
+
+# Same sample order as metadata: PCoA points and adonis2 rely on row position
+arg_mat <- arg_mat[metadata$sample_id, , drop = FALSE]
+```
+
+```{r bray}
+arg_rel <- decostand(
+  arg_mat,
+  method = "total")
+
+dist_bray <- vegdist(arg_rel, method = "bray")
+
+pcoa_bray <- run_pcoa(dist_bray, metadata)
+
+adonis_bray <- run_adonis(dist_bray, metadata)
+
+betadisper_bray <- run_betadisper(dist_bray, metadata)
+betadisper_bray_test <- permutest(betadisper_bray, permutations = 9999)
+```
+
+```{r Hellinger}
+
+arg_hellinger <- decostand(arg_mat, method = "hellinger")
+dist_hellinger <- dist(arg_hellinger, method = "euclidean")
+
+pcoa_hell <- run_pcoa(dist_hellinger, metadata)
+
+adonis_hell <- run_adonis(dist_hellinger, metadata)
+
+betadisper_hell <- run_betadisper(dist_hellinger, metadata)
+betadisper_hell_test <- permutest(betadisper_hell, permutations = 9999)
+```
+
+```{r Aitchison}
+dist_aitchison <- vegdist(
+  arg_mat,
+  method = "robust.aitchison"
+)
+
+pcoa_aitch <- run_pcoa(dist_aitchison, metadata)
+
+adonis_aitch <- run_adonis(dist_aitchison, metadata)
+
+betadisper_aitch <- run_betadisper(dist_aitchison, metadata)
+betadisper_aitch_test <- permutest(betadisper_aitch, permutations = 9999)
+```
+
+```{r adonis results}
+adonis_hell_df <- as.data.frame(adonis_hell) %>%
+  rownames_to_column("term") %>%
+  mutate(analysis = "Gene_Hellinger_Euclidean_CPM")
+
+adonis_bray_df <- as.data.frame(adonis_bray) %>%
+  rownames_to_column("term") %>%
+  mutate(analysis = "Gene_Bray_Curtis_CPM")
+
+adonis_aitch_df <- as.data.frame(adonis_aitch) %>%
+  rownames_to_column("term") %>%
+  mutate(analysis = "Gene_Aitchison_CPM")
+
+adonis_results <- bind_rows(adonis_hell_df, adonis_bray_df,adonis_aitch_df)
+
+print(adonis_results)
+```
+
+```{r betadisper results}
+betadisper_results <- tibble(
+  analysis = c(
+    "Hellinger_Euclidean",
+    "Bray_Curtis",
+    "Aitchison"
+  ),
+  statistic = c(
+    betadisper_hell_test$tab[1, "F"],
+    betadisper_bray_test$tab[1, "F"],
+    betadisper_aitch_test$tab[1, "F"]
+  ),
+  p_value = c(
+    betadisper_hell_test$tab[1, "Pr(>F)"],
+    betadisper_bray_test$tab[1, "Pr(>F)"],
+    betadisper_aitch_test$tab[1, "Pr(>F)"]
+  )
+)
+betadisper_results
+```
+
+```{r save tables}
+dir.create(here("0.-Diet_group", "Results", "Tables"), recursive = TRUE, showWarnings = FALSE)
+write_tsv(adonis_results, here("0.-Diet_group", "Results", "Tables", "beta_permanova.tsv"))
+write_tsv(betadisper_results, here("0.-Diet_group", "Results", "Tables", "beta_betadisper.tsv"))
+
+# PCoA coordinates and variance explained per axis, for the manuscript figures
+imap_dfr(list(Hellinger_Euclidean = pcoa_hell, Bray_Curtis = pcoa_bray, Aitchison = pcoa_aitch),
+         ~ .x$points %>%
+           transmute(sample_id, diet_group, metric = .y, PC1, PC2,
+                     var_PC1 = .x$var_exp[1], var_PC2 = .x$var_exp[2])) %>%
+  write_tsv(here("0.-Diet_group", "Results", "Tables", "resistome_pcoa_all_metrics.tsv"))
+```
+
+
+# Plots
+
+```{r Plot function}
+
+plot_pcoa <- function(pcoa_object, title, subtitle, adonis_object) {
+  
+  df <- pcoa_object$points
+  
+  pc1_lab <- paste0(
+    "PCoA1 [",
+    round(pcoa_object$var_exp[1] * 100, 2),
+    "%]")
+  
+  pc2_lab <- paste0(
+    "PCoA2 [",
+    round(pcoa_object$var_exp[2] * 100, 2),
+    "%]")
+  
+  r2 <- adonis_object$R2[1]
+  pval <- adonis_object$`Pr(>F)`[1]
+  
+  subtitle_full <- paste0(
+    subtitle,
+    ", p = ",
+    signif(pval, 3))
+  
+  ggplot(df, aes(x = PC1, y = PC2, fill = diet_group, colour = diet_group)) +
+    stat_ellipse(
+      geom = "polygon",
+      alpha = 0.20,
+      linewidth = 0.7,
+      show.legend = FALSE) +
+    geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.3) +
+    geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.3) +
+    geom_point(
+      pch = 21,
+      size = 2.4,
+      colour = "black",
+      alpha = 0.90) +
+    scale_fill_manual(values = diet_colors) +
+    scale_colour_manual(values = diet_colors) +
+    labs(
+      title = NULL,
+      subtitle = subtitle_full,
+      x = pc1_lab,
+      y = pc2_lab) +
+    theme(
+      legend.position = "bottom",
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(
+        colour = "black",
+        fill = NA,
+        linewidth = 0.6))}
+```
+
+```{r}
+plot_pcoa_hell <- plot_pcoa(
+  pcoa_object = pcoa_hell,
+  title = "Hellinger + Euclidean PCoA",
+  subtitle = "Hellinger + Euclidean",
+  adonis_object = adonis_hell)
+plot_pcoa_hell
+
+```
+
+```{r}
+plot_pcoa_bray <- plot_pcoa(
+  pcoa_object = pcoa_bray,
+  title = "Bray-Curtis PCoA",
+  subtitle = " Rel. Abund. Bray-Curtis",
+  adonis_object = adonis_bray)
+plot_pcoa_bray
+```
+
+```{r}
+plot_pcoa_aitch <- plot_pcoa(
+  pcoa_object = pcoa_aitch,
+  title = "Bray-Curtis PCoA",
+  subtitle = "Aitchison",
+  adonis_object = adonis_aitch)
+plot_pcoa_aitch
+```
+
+```{r}
+dir.create(here("0.-Diet_group", "Results", "Plots"), recursive = TRUE, showWarnings = FALSE)
+ggsave(here("0.-Diet_group", "Results", "Plots", "Hellinger_by_diet_color.png"), plot_pcoa_hell, width = 4.5, height = 5, dpi = 600, bg = "white")
+ggsave(here("0.-Diet_group", "Results", "Plots", "Bray_by_diet_color.png"), plot_pcoa_bray, width = 4.5, height = 5, dpi = 600, bg = "white")
+ggsave(here("0.-Diet_group", "Results", "Plots", "Aitch_by_diet_color.png"), plot_pcoa_aitch, width = 4.5, height = 5, dpi = 600, bg = "white")
+```

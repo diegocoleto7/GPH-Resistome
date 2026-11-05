@@ -1,0 +1,142 @@
+---
+title: "03.Scores_by_diet"
+author: "Diego Coleto"
+date: "2026-07-10"
+output: html_document
+---
+
+Distribution of the origin and NOVA scores (times/day) in each diet group.
+Pairwise Wilcoxon tests, BH-adjusted within each panel.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(here)
+library(ggpubr)
+
+table_dir <- here("1.-FFQ_analysis", "Results", "Tables")
+plot_dir <- here("1.-FFQ_analysis", "Results", "Plots")
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+
+```{r theme set, include=FALSE}
+theme_set(
+  theme_minimal(base_size = 10) +
+    theme(
+      plot.title = element_text(face = "bold", size = 11),
+      plot.title.position = "plot",
+      panel.grid.minor = element_blank(),
+      legend.position = "bottom",
+      legend.title = element_text(face = "bold"),
+      strip.text = element_text(face = "bold"),
+      panel.grid.major.x = element_blank()))
+
+diet_colors <- c(
+  "Omnivore"   = "#2864A5",
+  "Vegetarian" = "#9C3F90",
+  "Vegan"      = "#B36B32")
+```
+
+
+# Data load
+
+```{r data load}
+analysis_data <- read_tsv(file.path(table_dir, "analysis_data.tsv"), show_col_types = FALSE)
+score_info <- read_tsv(file.path(table_dir, "score_info.tsv"), show_col_types = FALSE) %>%
+  filter(system != "NOVA (sensitivity)")
+
+scores_long <- analysis_data %>%
+  select(sample_id, diet_group, all_of(score_info$score)) %>%
+  pivot_longer(all_of(score_info$score), names_to = "score", values_to = "times_day") %>%
+  left_join(score_info, by = "score") %>%
+  mutate(diet_group = factor(diet_group, levels = names(diet_colors)),
+         label = factor(label, levels = unique(score_info$label)))
+```
+
+
+# Summary by diet group
+
+```{r summary}
+scores_summary <- scores_long %>%
+  group_by(system, label, diet_group) %>%
+  summarise(median = median(times_day),
+            q1 = quantile(times_day, 0.25),
+            q3 = quantile(times_day, 0.75),
+            .groups = "drop")
+
+kruskal_results <- scores_long %>%
+  group_by(system, label) %>%
+  summarise(p_value = kruskal.test(times_day ~ diet_group)$p.value, .groups = "drop") %>%
+  group_by(system) %>%
+  mutate(p_adj = p.adjust(p_value, method = "BH")) %>%
+  ungroup()
+
+kruskal_results
+
+# Pairwise Wilcoxon tests, BH-adjusted within each score: the same tests geom_pwc draws on the plots below,
+# saved so that the manuscript figures and text can quote them
+pairwise_results <- scores_long %>%
+  group_by(system, label) %>%
+  group_modify(function(d, key) {
+    pw <- pairwise.wilcox.test(d$times_day, d$diet_group, p.adjust.method = "BH", exact = FALSE)$p.value
+    as.data.frame(as.table(pw)) %>%
+      filter(!is.na(Freq)) %>%
+      transmute(group1 = as.character(Var2), group2 = as.character(Var1), p_adj = Freq)
+  }) %>%
+  ungroup()
+
+pairwise_results %>% mutate(p_adj = signif(p_adj, 3)) %>% print(n = Inf)
+```
+
+
+# Plots
+
+```{r plot function}
+plot_scores <- function(system_i) {
+  ggplot(scores_long %>% filter(system == system_i),
+         aes(x = diet_group, y = times_day, colour = diet_group)) +
+    geom_boxplot(outlier.shape = NA, linewidth = 0.8) +
+    geom_jitter(aes(fill = diet_group),
+                colour = "black",
+                width = 0.18,
+                height = 0,
+                pch = 21,
+                size = 1.7,
+                alpha = 0.85) +
+    scale_colour_manual(values = diet_colors, name = "Diet group") +
+    scale_fill_manual(values = diet_colors, name = "Diet group") +
+    facet_wrap(~ label, scales = "free_y") +
+    geom_pwc(method = "wilcox_test",
+             label = "p.adj.signif",
+             p.adjust.method = "BH",
+             p.adjust.by = "panel",
+             hide.ns = "p.adj") +
+    labs(x = NULL, y = "Times/day")
+}
+```
+
+```{r origin, fig.width = 10, fig.height = 7}
+plot_origin <- plot_scores("Origin")
+plot_origin
+```
+
+```{r nova, fig.width = 8, fig.height = 7}
+plot_nova <- plot_scores("NOVA")
+plot_nova
+```
+
+
+# Save
+
+```{r save}
+write_tsv(scores_summary, file.path(table_dir, "scores_by_diet_summary.tsv"))
+write_tsv(kruskal_results, file.path(table_dir, "scores_by_diet_kruskal.tsv"))
+write_tsv(pairwise_results, file.path(table_dir, "scores_by_diet_pairwise.tsv"))
+
+ggsave(file.path(plot_dir, "Origin_by_diet.png"), plot_origin, width = 10, height = 7, dpi = 600, bg = "white")
+ggsave(file.path(plot_dir, "NOVA_by_diet.png"), plot_nova, width = 8, height = 7, dpi = 600, bg = "white")
+```

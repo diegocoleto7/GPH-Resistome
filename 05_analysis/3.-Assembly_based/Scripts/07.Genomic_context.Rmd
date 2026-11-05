@@ -1,0 +1,265 @@
+---
+title: "07.Genomic_context"
+author: "Diego Coleto"
+date: "2026-11-03"
+output: html_document
+---
+
+Where each ARG sits relative to the mobile genetic elements annotated on the same contig, and which ARGs sit next
+to each other in more than one participant. Descriptive only.
+
+What the annotations allow (checked on `Data/Processed/contig_mge.tsv` and `arg_hits.tsv`):
+
+* ARG and element coordinates share the same contig identifiers and are both 1-based. No strand is available,
+  so gene orientation cannot be studied.
+* **Positioned elements**: insertion sequences (ISEScan), ICE and IME (ICEfinder; MAP labels them
+  `conjugative_integron` and `integron`, but no integron caller was run) and prophages. Their coordinates
+  locate them within the contig.
+* **Contig classifications**: geNomad plasmid and viral calls span the whole contig. They say what the contig is,
+  not where an element lies, so they cannot place an ARG inside or near an element.
+* **Structural evidence** (repeats, compositional outliers) is kept apart, as in script 05.
+* MAP was run on ARG-carrying contigs only, so there is no background rate from contigs without ARGs.
+
+Each ARG hit gets the strongest level of evidence available, in this order:
+
+1. inside or overlapping a positioned element;
+2. within 5 kb of one. 5 kb spans a typical insertion sequence (0.7 to 2.5 kb) plus the flank of a composite
+   transposon. It is used only to describe; nothing is inferred from it;
+3. on the same contig as a positioned element, more than 5 kb away;
+4. on a contig classified as plasmid or viral, with no positioned element;
+5. structural evidence only;
+6. no MGE annotation.
+
+Levels 1 to 3 are physical co-location in an assembly. None of them shows mobilisation, transfer or conjugative
+ability. Contigs end at repeats, so ARGs near a contig end may have lost an adjacent element in assembly. For that
+reason every summary also reports how many hits have 5 kb of assembled sequence on both sides.
+
+Diet groups are summarised per participant, without a test: only 113 contigs carry a positioned element within
+5 kb of an ARG, and that subset is dominated by contig length.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(here)
+
+table_dir <- here("3.-Assembly_based", "Results", "Tables")
+```
+
+# Data
+
+```{r data}
+arg_hits <- read_tsv(file.path(table_dir, "arg_hits.tsv"), show_col_types = FALSE)
+contig_mge <- read_tsv(here("Data", "Processed", "contig_mge.tsv"), show_col_types = FALSE)
+metadata <- read_tsv(here("Data", "Processed", "metadata.tsv"), show_col_types = FALSE)
+who <- read_tsv(here("Data", "Processed", "arg_who_classification.tsv"), show_col_types = FALSE) %>%
+  distinct(AMR_variant = gene, gene_family)
+
+positioned_types <- c("insertion_sequence" = "Insertion sequence", "conjugative_integron" = "ICE",
+                      "integron" = "IME", "prophage" = "Prophage")
+contig_class_types <- c("plasmid", "viral_sequence")
+structural_types <- c("direct_repeat_element", "inverted_repeat_element", "compositional_outlier")
+stopifnot(all(contig_mge$element_type %in% c(names(positioned_types), contig_class_types, structural_types)))
+
+hits <- arg_hits %>%
+  left_join(who, by = "AMR_variant") %>%
+  left_join(metadata %>% select(sample_id, diet_group), by = "sample_id") %>%
+  mutate(hit_id = row_number(),
+         arg_start = pmin(AMR_start, AMR_end), arg_end = pmax(AMR_start, AMR_end),
+         flank = pmin(arg_start - 1, contig_length - arg_end),
+         flank_5kb = flank >= 5000,
+         diet_group = factor(diet_group, levels = c("Omnivore", "Vegetarian", "Vegan")))
+stopifnot(!anyNA(hits$gene_family), !anyNA(hits$diet_group))
+
+cat("ARG hits:", nrow(hits), "| contigs:", n_distinct(paste(hits$sample_id, hits$contig_id)),
+    "| participants:", n_distinct(hits$sample_id), "\n")
+
+# Every positioned element must lie within its contig
+positioned <- contig_mge %>%
+  filter(element_type %in% names(positioned_types)) %>%
+  inner_join(hits %>% distinct(sample_id, contig_id, contig_length), by = c("sample_id", "contig_id"))
+stopifnot(all(positioned$element_start >= 1), all(positioned$element_end <= positioned$contig_length))
+count(positioned, element_type)
+```
+
+# Evidence level of each ARG hit
+
+```{r distances}
+# Gap in bp between each ARG and each positioned element on its contig (0 when they overlap)
+pairs <- hits %>%
+  select(hit_id, sample_id, contig_id, arg_start, arg_end) %>%
+  inner_join(positioned %>% select(sample_id, contig_id, element_type, element_start, element_end),
+             by = c("sample_id", "contig_id"), relationship = "many-to-many") %>%
+  mutate(overlap = arg_start <= element_end & element_start <= arg_end,
+         gap = if_else(overlap, 0, pmax(element_start - arg_end, arg_start - element_end) - 1))
+
+nearest <- pairs %>%
+  group_by(hit_id) %>%
+  summarise(nearest_gap = min(gap),
+            any_overlap = any(overlap),
+            nearest_type = element_type[which.min(gap)],
+            nearest_is_gap = suppressWarnings(min(gap[element_type == "insertion_sequence"])),
+            .groups = "drop") %>%
+  mutate(nearest_is_gap = if_else(is.finite(nearest_is_gap), nearest_is_gap, NA_real_))
+
+contig_flags <- contig_mge %>%
+  group_by(sample_id, contig_id) %>%
+  summarise(contig_class = any(element_type %in% contig_class_types),
+            plasmid = any(element_type == "plasmid"),
+            structural = any(element_type %in% structural_types),
+            .groups = "drop")
+
+evidence_levels <- c("Inside or overlapping a positioned MGE", "Within 5 kb of a positioned MGE",
+                     "Same contig, more than 5 kb away", "Plasmid or viral contig, no positioned MGE",
+                     "Structural evidence only", "No MGE annotation")
+
+hit_context <- hits %>%
+  left_join(nearest, by = "hit_id") %>%
+  left_join(contig_flags, by = c("sample_id", "contig_id")) %>%
+  mutate(across(c(contig_class, plasmid, structural), ~ replace_na(.x, FALSE)),
+         evidence = case_when(
+           any_overlap %in% TRUE ~ evidence_levels[1],
+           nearest_gap <= 5000 ~ evidence_levels[2],
+           !is.na(nearest_gap) ~ evidence_levels[3],
+           contig_class ~ evidence_levels[4],
+           structural ~ evidence_levels[5],
+           TRUE ~ evidence_levels[6]),
+         evidence = factor(evidence, levels = evidence_levels),
+         nearest_type = unname(positioned_types[nearest_type]),
+         length_bin = cut(contig_length, c(0, 5000, 10000, 20000, Inf),
+                          labels = c("< 5 kb", "5-10 kb", "10-20 kb", "> 20 kb"), right = FALSE))
+
+evidence_summary <- hit_context %>%
+  count(evidence, name = "hits") %>%
+  mutate(share = hits / sum(hits)) %>%
+  left_join(hit_context %>% group_by(evidence) %>%
+              summarise(contigs = n_distinct(paste(sample_id, contig_id)), participants = n_distinct(sample_id),
+                        on_plasmid_contig = sum(plasmid), with_5kb_flanks = sum(flank_5kb), .groups = "drop"),
+            by = "evidence")
+evidence_summary
+
+# The same among the hits whose 5 kb on both sides were assembled, so that "no element nearby" can be judged
+evidence_evaluable <- hit_context %>%
+  filter(flank_5kb) %>%
+  count(evidence, name = "hits") %>%
+  mutate(share = hits / sum(hits))
+evidence_evaluable
+
+# Nearest positioned element of the hits within 5 kb, by type
+hit_context %>% filter(evidence %in% evidence_levels[1:2]) %>% count(evidence, nearest_type)
+
+# Dependence on contig length
+evidence_by_length <- hit_context %>%
+  group_by(length_bin) %>%
+  summarise(hits = n(), contigs = n_distinct(paste(sample_id, contig_id)),
+            positioned_within_5kb = mean(evidence %in% evidence_levels[1:2]),
+            any_positioned = mean(evidence %in% evidence_levels[1:3]),
+            plasmid_contig = mean(plasmid), with_5kb_flanks = mean(flank_5kb), .groups = "drop")
+evidence_by_length
+```
+
+# Distance to insertion sequences
+
+```{r is distance}
+is_distance <- hit_context %>%
+  filter(!is.na(nearest_is_gap)) %>%
+  transmute(sample_id, contig_id, gene_family, contig_length, flank, nearest_is_gap, plasmid, genus, diet_group)
+
+is_distance %>%
+  summarise(hits = n(), contigs = n_distinct(paste(sample_id, contig_id)),
+            median_gap = median(nearest_is_gap), within_1kb = mean(nearest_is_gap <= 1000),
+            within_5kb = mean(nearest_is_gap <= 5000), median_contig_length = median(contig_length))
+
+# Contigs with and without an insertion sequence: length
+hit_context %>%
+  distinct(sample_id, contig_id, contig_length, has_is = !is.na(nearest_is_gap)) %>%
+  group_by(has_is) %>%
+  summarise(contigs = n(), median_length = median(contig_length))
+
+# Gene families most often within 5 kb of an insertion sequence
+is_families <- is_distance %>%
+  filter(nearest_is_gap <= 5000) %>%
+  group_by(gene_family) %>%
+  summarise(hits = n(), participants = n_distinct(sample_id), median_gap = median(nearest_is_gap),
+            genera = paste(names(sort(table(genus), decreasing = TRUE)), collapse = "; "), .groups = "drop") %>%
+  left_join(hits %>% count(gene_family, name = "all_hits"), by = "gene_family") %>%
+  mutate(share_of_family_hits = hits / all_hits) %>%
+  arrange(desc(participants), desc(hits))
+is_families
+```
+
+# ARGs next to each other
+
+Adjacent ARG pairs: two consecutive ARG hits on the same contig separated by at most 1 kb (overlaps count as 0).
+A pair is recurrent when it is found in at least five participants; it is counted in participants, not contigs.
+
+```{r adjacent pairs}
+adjacent <- hit_context %>%
+  arrange(sample_id, contig_id, arg_start) %>%
+  group_by(sample_id, contig_id) %>%
+  filter(n() >= 2) %>%
+  mutate(next_family = lead(gene_family), next_start = lead(arg_start),
+         next_evidence = lead(evidence)) %>%
+  filter(!is.na(next_family)) %>%
+  ungroup() %>%
+  mutate(gap = pmax(next_start - arg_end - 1, 0),
+         pair = if_else(gene_family <= next_family, paste(gene_family, next_family, sep = " + "),
+                        paste(next_family, gene_family, sep = " + ")),
+         pair_positioned_5kb = evidence %in% evidence_levels[1:2] | next_evidence %in% evidence_levels[1:2])
+
+cat("Consecutive ARG pairs:", nrow(adjacent), "| within 1 kb:", sum(adjacent$gap <= 1000), "\n")
+
+recurrent_pairs <- adjacent %>%
+  filter(gap <= 1000) %>%
+  group_by(pair) %>%
+  summarise(participants = n_distinct(sample_id), contigs = n_distinct(paste(sample_id, contig_id)),
+            median_gap = median(gap),
+            omnivore = n_distinct(sample_id[diet_group == "Omnivore"]),
+            vegetarian = n_distinct(sample_id[diet_group == "Vegetarian"]),
+            vegan = n_distinct(sample_id[diet_group == "Vegan"]),
+            plasmid_contigs = n_distinct(paste(sample_id, contig_id)[plasmid]),
+            positioned_mge_5kb = n_distinct(paste(sample_id, contig_id)[pair_positioned_5kb]),
+            genera = paste(head(names(sort(table(replace_na(genus, "Unassigned")), decreasing = TRUE)), 3),
+                           collapse = "; "),
+            .groups = "drop") %>%
+  filter(participants >= 5) %>%
+  arrange(desc(participants))
+recurrent_pairs
+```
+
+# Per participant, by diet group (descriptive)
+
+```{r per participant}
+per_participant <- hit_context %>%
+  group_by(sample_id, diet_group) %>%
+  summarise(hits = n(),
+            positioned_within_5kb = mean(evidence %in% evidence_levels[1:2]),
+            plasmid_contig = mean(plasmid),
+            .groups = "drop")
+
+context_by_diet <- per_participant %>%
+  group_by(diet_group) %>%
+  summarise(participants = n(), hits = sum(hits),
+            participants_with_positioned_5kb = sum(positioned_within_5kb > 0),
+            median_share_positioned_5kb = median(positioned_within_5kb),
+            mean_share_positioned_5kb = mean(positioned_within_5kb),
+            .groups = "drop")
+context_by_diet
+```
+
+# Save
+
+```{r save}
+write_tsv(hit_context %>% select(sample_id, contig_id, contig_length, AMR_variant, gene_family, arg_start, arg_end,
+                                 flank, flank_5kb, evidence, nearest_type, nearest_gap, nearest_is_gap, plasmid,
+                                 genus, diet_group, length_bin),
+          file.path(table_dir, "genomic_context_hits.tsv"))
+write_tsv(evidence_summary, file.path(table_dir, "genomic_context_evidence.tsv"))
+write_tsv(evidence_evaluable, file.path(table_dir, "genomic_context_evidence_evaluable.tsv"))
+write_tsv(evidence_by_length, file.path(table_dir, "genomic_context_by_length.tsv"))
+write_tsv(is_families, file.path(table_dir, "genomic_context_is_families.tsv"))
+write_tsv(recurrent_pairs, file.path(table_dir, "genomic_context_adjacent_pairs.tsv"))
+write_tsv(context_by_diet, file.path(table_dir, "genomic_context_by_diet.tsv"))
+```

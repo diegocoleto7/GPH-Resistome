@@ -1,0 +1,26 @@
+action	cluster_representative	gene_pattern	gene_family	section	reason	decided
+alias	blaCTX-M-211_1_MH067961		blaCTX-M-1	D4	Cluster del grupo CTX-M-1 (contiene blaCTX-M-1 y CTX-M-15); el representante CTX-M-211 es un alelo arbitrario. Se usa el nombre de grupo estándar. BLEE, crítico OMS.	2026-10-29
+alias	blaCTX-M-110_1_JF274242		blaCTX-M-9	D4	Cluster del grupo CTX-M-9 (contiene blaCTX-M-9); lo detectado es CTX-M-113, no CTX-M-110. BLEE, crítico OMS.	2026-10-29
+alias	blaCMY-18_1_AY743434		blaCMY-2	D4	Cluster del grupo CMY-2 (contiene blaCMY-2), AmpC plasmídica de origen Citrobacter; el representante CMY-18 es arbitrario.	2026-10-29
+alias	blaOXA-392_1_AB901044		blaOXA-1	D4	Cluster del grupo OXA-1 (contiene blaOXA-1); lo detectado es OXA-224/OXA-320.	2026-10-29
+alias	blaOXA-280_1_APPZ01000001		blaOXA-211	D4	Cluster del grupo OXA-211 (contiene blaOXA-211); lo detectado es OXA-334.	2026-10-29
+alias	blaOXA-395_1_AY306133		blaOXA-50	D4	Cluster del grupo OXA-50 (contiene blaOXA-50), OXA intrínseca de P. aeruginosa; lo detectado es OXA-486.	2026-10-29
+alias	blaOXA-539_1_KY094077		blaOXA-2	D4	Cluster del grupo OXA-2 (contiene blaOXA-2); lo detectado es OXA-34/OXA-539.	2026-10-29
+alias	qnrB41_1_JN166690		qnrB1	D4	Cluster que contiene qnrB1 (gen de referencia); lo detectado es qnrB19/qnrB5/qnrB81, no qnrB41.	2026-10-29
+alias	dfrA30_1_AM997279		dfrA5	D4	Error de etiqueta: en GPH solo se detecta dfrA5 y la unidad se llamaba dfrA30.	2026-10-29
+alias	dfrA7_5_AJ419170		dfrA7/17	D5	Error de etiqueta: el cluster une dfrA7 y dfrA17 (90,1-90,5 %) y en GPH solo se detecta dfrA17, muy frecuente en integrones de clase 1.	2026-10-29
+alias	aadA4_1_Z50802		aadA4/5	D5	Error de etiqueta: el cluster une aadA4 y aadA5 y en GPH solo se detecta aadA5.	2026-10-29
+alias	ant(3'')-Ia_1_X02340		aadA1	D5	Sinónimo: ant(3'')-Ia es aadA1 (ResFinder mantiene los dos nombres); el resto del cluster se nombra aadA.	2026-10-29
+alias	CmlA7_1_JQ639792		cmlA	D5	Error de etiqueta: el representante CmlA7 no se detecta; lo detectado es cmlA1 y CmlA5. Se usa el nombre de la familia cmlA.	2026-10-29
+alias	blaDHA-1_1_Y16410		blaDHA	D6	Alelo frente a familia: alelos DHA (AmpC plasmídica) indistinguibles con lecturas cortas. La regla de raíz no aplica porque el cluster también contiene blaMOR (AmpC cromosómica de Morganella, origen de DHA); se nombra por la familia dominante.	2026-10-29
+alias	blaMIR-2_1_AY227752		blaMIR	D6	Alelo frente a familia: AmpC de Enterobacter; blaMIR-1/3 caen en el cluster de blaACT-1, por eso la regla de raíz no aplica.	2026-10-29
+alias	blaACC-2_1_AF180952		blaACC	D6	Alelo frente a familia: AmpC de origen Hafnia; varios alelos ACC indistinguibles. La regla de raíz no aplica porque blaACC-3 forma otro cluster.	2026-10-29
+alias	blaOKP-A-1_1_AM051138		blaOKP	D6	Alelo frente a familia: el cluster mezcla OKP-A y OKP-B (cromosómicas de K. quasipneumoniae), así que OKP-A-1 es inexacto.	2026-10-29
+alias	blaSHV-100_1_AM941846		blaSHV	D6	Alelo frente a familia: se une con las SHV separadas del cluster de blaLEN3, de modo que todas las SHV forman una unidad.	2026-10-29
+alias	aac(3)-IIa_1_X51534		aac(3)-II	D6	Alelo frente a familia: el cluster contiene aac(3)-IIa y aac(3)-IId; la regla de raíz no aplica porque el nombre no acaba en número.	2026-10-29
+alias	blaLEN3_1_AY130286		blaLEN	D1	Tras separar las SHV (fila siguiente), el resto del cluster son alelos LEN (cromosómica de K. variicola); se nombra por la familia.	2026-10-29
+split_by_gene	blaLEN3_1_AY130286	^blaSHV	blaSHV	D1	El cluster contiene 122 variantes SHV (incluida blaSHV-1) y 23 LEN a 90,0-91,3 % del representante LEN3, elegido solo por ser el más largo. SHV (cromosómica de K. pneumoniae y plasmídica con BLEE) y LEN (intrínseca de K. variicola) son biológicamente distintas y al ~90 % las lecturas sí las distinguen.	2026-10-29
+keep_together	aph(2'')-Ia_2_AP009486		aph(2'')-Ia	D1	MASTER separa a mano aph(2'') y aac(6')-aph(2''), que son el mismo gen bifuncional AAC(6')-Ie-APH(2'')-Ia con dos nombres en ResFinder (99,7 % de identidad). Coaparecen en 49 de 60 muestras, patrón de reparto de lecturas entre referencias casi idénticas: separarlos contaría el mismo gen dos veces. Se mantienen juntos.	2026-10-29
+keep_together	tet(X)_3_AB097942		tet(X)	D1	Nuestro CD-HIT, como el de MASTER, deja tet(X)_3/tet(X6) en un cluster distinto del de tet(X)_1, pero ambos representantes se llaman tet(X) y se suman por nombre; MASTER nombró el segundo 'tet(X6) like'. Las 39 muestras con lecturas de ese cluster también tienen tet(X) y suponen ~1 % de sus hits (mapeo cruzado probable). Se mantienen juntos como tet(X).	2026-10-29
+keep_together	cat_5_U35036		cat	D1	MASTER separa a mano cat(pC233) (variante plasmídica de S. aureus, 93,8 % de identidad) del resto de cat. Afecta a 1 muestra. Se mantienen juntos.	2026-10-29
+keep_together	CmlA7_1_JQ639792		cmlA	D1	MASTER separa cml y cmlA1; nuestro cluster une cmlA1, CmlA5 (no está en MASTER) y CmlA7. Sin coaparición relevante. Se mantienen juntos bajo el nombre de familia cmlA (ver alias).	2026-10-29

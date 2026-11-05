@@ -1,0 +1,302 @@
+---
+title: "03.Taxa_by_diet"
+author: "Diego Coleto"
+date: "2026-10-20"
+output: html_document
+---
+
+Microbiome composition by diet group (MetaPhlAn 4).
+
+* Description of the most abundant phyla, genera and species (relative abundance of the classified profile).
+* Diet signatures: MaAsLin2 at species and genus level, same settings as the resistome
+  (`0.-Diet_group/Scripts/03.AMR_description.Rmd`): LOG transform, prevalence ≥ 10 %,
+  diet group (reference Omnivore) + sex + age + BMI + log10 depth.
+  MetaPhlAn output is already relative abundance, so it is only re-normalised to 1 (TSS) and no further
+  normalisation is applied in MaAsLin2.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(here)
+library(phyloseq)
+library(patchwork)
+library(Maaslin2)
+
+table_dir <- here("2.-Microbiome", "Results", "Tables")
+plot_dir <- here("2.-Microbiome", "Results", "Plots")
+maaslin_dir <- here("2.-Microbiome", "Results", "Maaslin2")
+dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(maaslin_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+
+# Set plot themes
+
+```{r theme}
+diet_colors <- c(
+  "Omnivore"   = "#2864A5",
+  "Vegetarian" = "#9C3F90",
+  "Vegan"      = "#B36B32")
+
+taxa_palette <- c("#0F4C81", "#C49135", "#4C956C", "#A23E48", "#765D9A", "#2D6A8A",
+                  "#E0A458", "#789447", "#C46D4A", "#5B5F97", "#D35D90", "#346B5B",
+                  "#8E6B55", "#9A648D", "#4F6D9A")
+other_color <- "#B8B8B8"
+
+theme_set(
+  theme_minimal(base_size = 10) +
+    theme(
+      plot.title = element_text(face = "bold", size = 11),
+      plot.subtitle = element_text(size = 9, color = "grey30"),
+      plot.title.position = "plot",
+      panel.grid.minor = element_blank(),
+      legend.position = "bottom",
+      legend.title = element_blank(),
+      strip.text = element_text(face = "bold", size = 9)))
+```
+
+
+# Load data
+
+```{r load data}
+ps <- readRDS(here("Data", "Processed", "phyloseq_species.rds"))
+
+# Relative abundance of the classified profile
+ps_rel <- transform_sample_counts(ps, function(x) x / sum(x))
+
+metadata <- as(sample_data(ps), "data.frame") %>%
+  rownames_to_column("sample_id") %>%
+  mutate(diet_group = factor(diet_group, levels = names(diet_colors)))
+```
+
+
+# Description
+
+```{r composition helper}
+# Mean relative abundance per diet group of the top_n taxa at a rank; the rest are pooled as "Other"
+composition_by_diet <- function(rank, top_n) {
+  melt <- ps_rel %>%
+    tax_glom(taxrank = rank, NArm = FALSE) %>%
+    psmelt() %>%
+    select(sample_id = Sample, diet_group, taxon = all_of(rank), Abundance)
+
+  top_taxa <- melt %>%
+    group_by(taxon) %>%
+    summarise(mean = mean(Abundance), .groups = "drop") %>%
+    slice_max(mean, n = top_n) %>%
+    pull(taxon)
+
+  melt %>%
+    mutate(taxon = if_else(taxon %in% top_taxa, taxon, "Other"),
+           taxon = factor(taxon, levels = c(top_taxa, "Other")),
+           diet_group = factor(diet_group, levels = names(diet_colors))) %>%
+    group_by(sample_id, diet_group, taxon) %>%
+    summarise(Abundance = sum(Abundance), .groups = "drop") %>%
+    group_by(diet_group, taxon) %>%
+    summarise(mean_abundance = mean(Abundance), .groups = "drop")
+}
+
+plot_composition <- function(df, title) {
+  taxa <- setdiff(levels(df$taxon), "Other")
+  colors <- c(setNames(taxa_palette[seq_along(taxa)], taxa), Other = other_color)
+
+  ggplot(df, aes(x = diet_group, y = mean_abundance, fill = taxon)) +
+    geom_col(width = 0.72, colour = "white", linewidth = 0.2) +
+    scale_fill_manual(values = colors, name = title) +
+    scale_y_continuous(labels = scales::label_percent(), expand = expansion(mult = c(0, 0.02))) +
+    labs(x = NULL, y = "Mean relative abundance") +
+    theme_bw(base_size = 10) +
+    theme(axis.text.x = element_text(face = "bold", colour = unname(diet_colors), size = 9),
+          panel.grid.major.x = element_blank(),
+          panel.grid.minor = element_blank(),
+          legend.position = "right",
+          legend.title = element_text(face = "bold", size = 9),
+          legend.text = element_text(face = "italic", size = 8))
+}
+```
+
+```{r phylum and genus}
+phylum_by_diet <- composition_by_diet("Phylum", top_n = 8)
+genus_by_diet <- composition_by_diet("Genus", top_n = 15)
+
+plot_composition_panel <- plot_composition(phylum_by_diet, "Phylum") |
+  plot_composition(genus_by_diet, "Genus")
+
+plot_composition_panel
+```
+
+## Top 20 species
+
+```{r top species}
+species_long <- psmelt(ps_rel) %>%
+  transmute(sample_id = Sample, diet_group = factor(diet_group, levels = names(diet_colors)),
+            species = OTU, phylum = Phylum, abundance = Abundance)
+
+taxa_summary <- species_long %>%
+  group_by(species, phylum) %>%
+  summarise(prevalence = mean(abundance > 0),
+            mean_abundance = mean(abundance),
+            .groups = "drop") %>%
+  left_join(species_long %>%
+              group_by(species, diet_group) %>%
+              summarise(mean = mean(abundance), .groups = "drop") %>%
+              pivot_wider(names_from = diet_group, values_from = mean, names_prefix = "mean_"),
+            by = "species") %>%
+  arrange(desc(mean_abundance))
+
+top20_species <- taxa_summary %>% slice_head(n = 20) %>% pull(species)
+species_levels <- rev(top20_species)
+
+top20_summary <- species_long %>%
+  filter(species %in% top20_species) %>%
+  group_by(species, diet_group) %>%
+  summarise(n = n(),
+            mean = mean(abundance),
+            se = sd(abundance) / sqrt(n),
+            ci_low = pmax(0, mean - qt(0.975, n - 1) * se),
+            ci_high = mean + qt(0.975, n - 1) * se,
+            .groups = "drop") %>%
+  mutate(species = factor(species, levels = species_levels))
+
+plot_species_abundance <- ggplot(top20_summary, aes(x = species, colour = diet_group, group = diet_group)) +
+  geom_errorbar(aes(ymin = ci_low, ymax = ci_high),
+                position = position_dodge(width = 0.68),
+                width = 0.20,
+                linewidth = 0.65) +
+  geom_point(aes(y = mean),
+             position = position_dodge(width = 0.68),
+             shape = 18,
+             size = 3.2) +
+  coord_flip() +
+  scale_colour_manual(values = diet_colors, drop = FALSE) +
+  scale_y_continuous(labels = scales::label_percent(accuracy = 0.1),
+                     expand = expansion(mult = c(0.01, 0.08))) +
+  labs(x = NULL, y = "Mean relative abundance", colour = "Diet group") +
+  theme_bw(base_size = 10) +
+  theme(axis.text.y = element_text(face = "italic", size = 9),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = "bottom")
+
+# Phylum of each species as a coloured tile
+top20_phyla <- taxa_summary %>%
+  filter(species %in% top20_species) %>%
+  mutate(species = factor(species, levels = species_levels))
+phylum_colors <- setNames(taxa_palette[seq_along(unique(top20_phyla$phylum))], sort(unique(top20_phyla$phylum)))
+
+plot_species_phylum <- ggplot(top20_phyla, aes(x = 1, y = species, fill = phylum)) +
+  geom_tile(width = 0.9, height = 0.9, colour = "white") +
+  scale_fill_manual(values = phylum_colors, name = "Phylum") +
+  labs(x = NULL, y = NULL) +
+  theme_void(base_size = 10) +
+  theme(legend.position = "right",
+        legend.title = element_text(face = "bold", size = 9))
+
+plot_top20_species <- plot_species_abundance + plot_species_phylum +
+  plot_layout(widths = c(6, 0.4))
+
+plot_top20_species
+```
+
+
+# Diet signatures (MaAsLin2)
+
+```{r maaslin function}
+metadata_maaslin <- metadata %>%
+  column_to_rownames("sample_id")
+
+# Abundance table at a rank with safe feature names for MaAsLin2
+abundance_table <- function(rank) {
+  ps_rank <- if (rank == "Species") ps_rel else tax_glom(ps_rel, taxrank = rank, NArm = FALSE)
+  abundance <- as(otu_table(ps_rank), "matrix")
+  taxa <- as(tax_table(ps_rank), "matrix")[, rank]
+  key <- tibble(feature = sprintf("%s_%04d", rank, seq_along(taxa)), taxon = unname(taxa))
+  rownames(abundance) <- key$feature
+  list(data = as.data.frame(t(abundance)), key = key)
+}
+
+run_maaslin_diet <- function(rank) {
+  input <- abundance_table(rank)
+
+  fit <- Maaslin2(
+    input_data = input$data,
+    input_metadata = metadata_maaslin,
+    output = file.path(maaslin_dir, paste0("Diet_", rank)),
+    fixed_effects = c("diet_group", "sex", "age", "bmi", "log10_depth"),
+    reference = "diet_group,Omnivore",
+    normalization = "NONE",
+    transform = "LOG",
+    min_prevalence = 0.1,
+    min_abundance = 0,
+    standardize = FALSE,
+    plot_heatmap = FALSE,
+    plot_scatter = FALSE)
+
+  fit$results %>%
+    left_join(input$key, by = "feature") %>%
+    mutate(rank = rank) %>%
+    relocate(rank, taxon)
+}
+```
+
+```{r maaslin}
+maaslin_results <- bind_rows(run_maaslin_diet("Species"), run_maaslin_diet("Genus"))
+
+diet_results <- maaslin_results %>%
+  filter(metadata == "diet_group") %>%
+  mutate(contrast = paste(value, "vs Omnivore"),
+         enriched_in = if_else(coef > 0, value, "Omnivore"))
+
+diet_results %>%
+  filter(qval < 0.25) %>%
+  count(rank, contrast, enriched_in, name = "n_taxa")
+```
+
+```{r signature plot}
+signature_data <- diet_results %>%
+  filter(rank == "Species", qval < 0.25) %>%
+  group_by(contrast, enriched_in) %>%
+  slice_min(qval, n = 15, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(enriched_in = factor(enriched_in, levels = names(diet_colors)),
+         q_label = case_when(qval < 0.001 ~ "***", qval < 0.01 ~ "**", qval < 0.05 ~ "*", TRUE ~ ""),
+         taxon = fct_reorder(taxon, coef))
+
+plot_signature <- ggplot(signature_data, aes(x = coef, y = taxon, fill = enriched_in)) +
+  geom_vline(xintercept = 0, colour = "grey40", linewidth = 0.4) +
+  geom_col(width = 0.72, colour = "black", linewidth = 0.2) +
+  geom_errorbar(aes(xmin = coef - stderr, xmax = coef + stderr), width = 0.25, linewidth = 0.3, orientation = "y") +
+  geom_text(aes(x = coef + sign(coef) * (stderr + 0.1), label = q_label,
+                hjust = if_else(coef > 0, 0, 1)), size = 3, vjust = 0.75) +
+  facet_wrap(~ contrast, scales = "free_y") +
+  scale_fill_manual(values = diet_colors, drop = FALSE, name = "Enriched in") +
+  labs(x = "MaAsLin2 coefficient (log2 relative abundance)", y = NULL,
+       subtitle = "Up to 15 species enriched in each group per contrast, q < 0.25 (* q < 0.05, ** q < 0.01, *** q < 0.001)") +
+  theme_bw(base_size = 10) +
+  theme(axis.text.y = element_text(face = "italic", size = 8),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = "bottom",
+        legend.title = element_text(face = "bold"))
+
+plot_signature
+```
+
+
+# Save
+
+```{r save}
+write_tsv(taxa_summary, file.path(table_dir, "species_abundance_summary.tsv"))
+write_tsv(bind_rows(Phylum = phylum_by_diet, Genus = genus_by_diet, .id = "rank"),
+          file.path(table_dir, "composition_by_diet.tsv"))
+write_tsv(diet_results, file.path(table_dir, "maaslin2_diet_taxa.tsv"))
+
+ggsave(file.path(plot_dir, "Composition_by_diet.png"), plot_composition_panel, width = 11, height = 6, dpi = 600, bg = "white")
+ggsave(file.path(plot_dir, "Top20_species_by_diet.png"), plot_top20_species, width = 9, height = 7, dpi = 600, bg = "white")
+ggsave(file.path(plot_dir, "Diet_signature_species.png"), plot_signature, width = 12,
+       height = max(5, 0.22 * max(table(signature_data$contrast)) + 2), dpi = 600, bg = "white")
+```

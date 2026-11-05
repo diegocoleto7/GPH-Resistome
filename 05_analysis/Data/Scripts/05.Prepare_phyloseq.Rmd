@@ -1,0 +1,71 @@
+---
+title: "05.Prepare_phyloseq"
+author: "Diego Coleto"
+date: "2026-10-20"
+output: html_document
+---
+
+MetaPhlAn 4 (GTDB, species level, decontaminated) phyloseq object prepared for the analyses:
+
+* sample names as in the rest of the project (`GPH_1`)
+* only samples in `metadata.tsv`, with the processed metadata as sample data
+* short taxa names (species) and clean ranks (no `d__`, `p__` prefixes)
+* abundances kept as MetaPhlAn proportions of the total profile (the unclassified fraction is not included)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(phyloseq)
+library(here)
+```
+
+# Load data
+
+```{r load data}
+ps <- readRDS(here("Data", "Raw", "Metaphlan", "physeq_gtdb_species_decontam.rds"))
+metadata <- read_tsv(here("Data", "Processed", "metadata.tsv"), show_col_types = FALSE)
+ps
+```
+
+# Samples
+
+```{r samples}
+sample_names(ps) <- gsub("-", "_", sample_names(ps))
+
+cat("Samples in phyloseq but not in metadata:", setdiff(sample_names(ps), metadata$sample_id), "\n")
+cat("Samples in metadata but not in phyloseq:", setdiff(metadata$sample_id, sample_names(ps)), "\n")
+
+ps <- prune_samples(metadata$sample_id, ps)
+
+sample_metadata <- metadata %>%
+  mutate(log10_depth = log10(reads)) %>%
+  column_to_rownames("sample_id")
+
+sample_data(ps) <- sample_data(sample_metadata[sample_names(ps), ])
+```
+
+# Taxa
+
+```{r taxa}
+ps <- prune_taxa(taxa_sums(ps) > 0, ps)
+
+tax <- as(tax_table(ps), "matrix")[, c("domain", "phylum", "class", "order", "family", "genus", "species")]
+tax <- sub("^[a-z]__", "", tax)
+colnames(tax) <- str_to_title(colnames(tax))
+
+stopifnot(!anyDuplicated(tax[, "Species"]))
+taxa_names(ps) <- tax[, "Species"]
+rownames(tax) <- tax[, "Species"]
+tax_table(ps) <- tax_table(tax)
+
+ps
+```
+
+# Save
+
+```{r save}
+saveRDS(ps, here("Data", "Processed", "phyloseq_species.rds"))
+```

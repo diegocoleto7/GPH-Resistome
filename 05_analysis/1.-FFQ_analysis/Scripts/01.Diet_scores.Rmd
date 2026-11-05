@@ -1,0 +1,249 @@
+---
+title: "01.Diet_scores"
+author: "Diego Coleto"
+date: "2026-07-01"
+output: html_document
+---
+
+Builds everything the later scripts need:
+
+* `food_classification.tsv`: one row per FFQ food with its origin and NOVA group.
+* `ffq_frequency_day.tsv`: FFQ answers converted to times/day.
+* `diet_scores.tsv`: times/day summed by origin and NOVA group.
+* `score_info.tsv`: score names, system and plot labels.
+* `analysis_data.tsv`: metadata + ARG metrics + diet scores, one row per sample.
+
+The origin group "mineral or other" only contains salt; it is kept so that every FFQ food is assigned to an origin group.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(here)
+library(readxl)
+
+table_dir <- here("1.-FFQ_analysis", "Results", "Tables")
+dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+
+# Data load
+
+```{r data load}
+ffq <- read_tsv(here("Data", "Processed", "ffq_english.tsv"), show_col_types = FALSE)
+ffq_dictionary <- read_tsv(here("Data", "Processed", "ffq_dictionary.tsv"), show_col_types = FALSE)
+metadata <- read_tsv(here("Data", "Processed", "metadata.tsv"), show_col_types = FALSE)
+arg_metrics <- read_tsv(here("Data", "Processed", "arg_metrics.tsv"), show_col_types = FALSE)
+nova <- read_excel(here("1.-FFQ_analysis", "NOVA_definitive_classification.xlsx"), sheet = "NOVA")
+```
+
+
+# FFQ to times/day
+
+FFQ answer codes and their frequency in times/day.
+
+```{r frequency}
+freq_per_day <- c(
+  "1" = 0,        # never or < 1/month
+  "2" = 2 / 30,   # 1-3/month
+  "3" = 1 / 7,    # 1/week
+  "4" = 3 / 7,    # 2-4/week
+  "5" = 5.5 / 7,  # 5-6/week
+  "6" = 1,        # 1/day
+  "7" = 2.5,      # 2-3/day
+  "8" = 4.5,      # 4-6/day
+  "9" = 6)        # > 6/day
+
+ffq_day <- ffq %>%
+  mutate(across(-sample_id, ~ unname(freq_per_day[as.character(.x)])))
+
+stopifnot(!anyNA(ffq_day))
+```
+
+
+# Food classification
+
+## Origin
+
+```{r origin groups}
+origin_groups <- list(
+
+  animal_primary = c(
+    "eggs", "poultry_with_skin", "skinless_poultry", "beef", "pork",
+    "lamb", "rabbit", "beef_liver", "offal",
+    "white_fish", "oily_fish", "bivalves", "cephalopods", "crustaceans",
+    "serrano_ham", "cooked_ham", "processed_meat", "pate", "hamburger",
+    "bacon", "salted_fish", "canned_fish_in_brine", "canned_fish_in_oil",
+    "fish_sticks", "lard"
+  ),
+
+  animal_derived = c(
+    "whole_milk", "semi_skimmed_milk", "skimmed_milk", "condensed_milk",
+    "cream", "milkshake", "whole_yogurt", "skimmed_yogurt", "petit_suisse",
+    "cottage_cheese", "cream_cheese", "other_cheese", "fresh_cheese",
+    "custard", "ice_cream",
+    "butter", "mayonnaise", "honey", "kefir"
+  ),
+
+  plant_primary = c(
+    "lentils", "beans", "chickpeas", "peas", "nutritional_yeast",
+    "textured_soy_protein", "tofu", "tahini", "legume_based_pasta",
+    "plant_based_omelette", "peanuts", "peanut_butter",
+    "chard", "brassica_vegetables", "lettuce", "tomato", "carrot",
+    "green_beans", "eggplant", "pepper", "asparagus", "gazpacho",
+    "other_vegetables", "onion", "garlic_cloves", "spices", "mushrooms",
+    "citrus_fruits", "banana", "apple", "strawberries", "cherries",
+    "peach", "watermelon", "melon", "kiwi", "grapes", "dates",
+    "nuts", "seeds", "nut_butter",
+    "rice", "boiled_tubers", "pasta", "rice_pasta", "pseudocereals",
+    "couscous", "wheat_germ",
+    "fresh_orange_juice", "fresh_fruit_juice", "coffee",
+    "decaffeinated_coffee", "herbal_tea", "defatted_cocoa_powder"
+  ),
+
+  plant_derived = c(
+    "unsweetened_soy_drink", "sweetened_soy_drink",
+    "unsweetened_oat_drink", "sweetened_oat_drink",
+    "unsweetened_almond_drink", "sweetened_almond_drink",
+    "other_plant_based_drink",
+    "sweetened_soy_yogurt", "unsweetened_soy_yogurt",
+    "sweetened_coconut_yogurt", "unsweetened_coconut_yogurt",
+    "other_plant_based_yogurt",
+    "soy_based_cheese", "nut_based_cheese", "spreadable_soy_based_cheese",
+    "sliced_plant_based_cheese", "grated_plant_based_cheese",
+    "plant_based_cream",
+    "legume_based_fillet", "vegetable_based_fillet", "seitan",
+    "legume_based_pate", "vegetable_quiche",
+    "fried_peanuts", "olives", "fruit_in_syrup", "fried_nuts",
+    "white_bread", "sliced_white_bread", "whole_grain_bread",
+    "sliced_whole_grain_bread", "breadsticks", "plant_based_pizza",
+    "breakfast_cereals", "sweetened_breakfast_cereals",
+    "whole_grain_cereals", "sweetened_whole_grain_cereals",
+    "potato_chips", "fried_tubers",
+    "olive_oil", "extra_virgin_olive_oil", "refined_oil", "margarine",
+    "dark_chocolate_70_percent", "cocoa_powder",
+    "sugar_sweetened_soft_drinks", "zero_sugar_soft_drinks",
+    "non_cola_soft_drinks", "zero_sugar_non_cola_soft_drinks",
+    "packaged_fruit_juice", "wine", "beer", "alcohol_free_beer",
+    "zero_zero_beer", "spirits",
+    "mustard", "tomato_sauce", "hot_sauce", "jam",
+    "no_added_sugar_jam", "sugar", "snacks",
+    "miso", "soy_sauce", "sauerkraut", "kimchi", "kombucha",
+    "tempeh", "natto", "pickled_vegetables"
+  ),
+
+  mixed_composite = c(
+    "homemade_pizza", "commercial_pizza",
+    "maria_biscuits", "whole_grain_biscuits", "chocolate_biscuits",
+    "homemade_cake", "croissant", "doughnut", "muffin", "pastries",
+    "churros", "chocolate", "turron", "mantecados",
+    "croquettes", "instant_soup"
+  ),
+
+  mineral_or_other = c(
+    "salt"
+  )
+)
+
+origin <- enframe(origin_groups, name = "origin", value = "food") %>%
+  unnest(food)
+```
+
+## NOVA
+
+Definitive NOVA groups come from `NOVA_definitive_classification.xlsx`. Foods flagged in the justification as
+"added back in the sensitivity analysis" are moved to NOVA 1 in the sensitivity classification.
+
+```{r nova groups}
+nova <- nova %>%
+  transmute(code = Item_code,
+            description = Item_description,
+            nova = as.integer(NOVA_definitive),
+            nova_sensitivity = if_else(str_detect(Justification, "sensitivity analysis"), 1L, nova))
+
+cat("Foods moved to NOVA 1 in the sensitivity classification:\n")
+nova %>% filter(nova != nova_sensitivity) %>% select(code, description, nova) %>% print()
+```
+
+## Classification table
+
+```{r classification}
+food_classification <- ffq_dictionary %>%
+  left_join(nova, by = "code") %>%
+  left_join(origin, by = "food") %>%
+  select(food, code, description, origin, nova, nova_sensitivity)
+
+# Every FFQ food must have exactly one origin and one NOVA group
+stopifnot(setequal(food_classification$food, setdiff(names(ffq), "sample_id")),
+          !anyDuplicated(food_classification$food),
+          !anyNA(food_classification))
+
+count(food_classification, origin)
+count(food_classification, nova)
+```
+
+
+# Diet scores
+
+Each score is the sum of times/day of the foods in a group.
+
+```{r scores}
+score_groups <- bind_rows(
+  food_classification %>% transmute(food, score = paste0("origin_", origin)),
+  food_classification %>% transmute(food, score = paste0("nova_", nova)),
+  food_classification %>% transmute(food, score = paste0("nova_", nova_sensitivity, "_sensitivity")))
+
+diet_scores <- ffq_day %>%
+  pivot_longer(-sample_id, names_to = "food", values_to = "times_day") %>%
+  inner_join(score_groups, by = "food", relationship = "many-to-many") %>%
+  group_by(sample_id, score) %>%
+  summarise(times_day = sum(times_day), .groups = "drop") %>%
+  pivot_wider(names_from = score, values_from = times_day)
+
+# Keep only the sensitivity scores that differ from the main classification
+unchanged <- str_subset(names(diet_scores), "_sensitivity$") %>%
+  keep(~ isTRUE(all.equal(diet_scores[[.x]], diet_scores[[str_remove(.x, "_sensitivity$")]])))
+diet_scores <- diet_scores %>% select(-all_of(unchanged))
+
+score_info <- tibble(score = setdiff(names(diet_scores), "sample_id")) %>%
+  mutate(system = case_when(str_detect(score, "_sensitivity$") ~ "NOVA (sensitivity)",
+                            str_detect(score, "^nova_") ~ "NOVA",
+                            TRUE ~ "Origin"),
+         label = case_when(system == "Origin" ~ str_to_sentence(str_replace_all(str_remove(score, "^origin_"), "_", " ")),
+                           TRUE ~ paste("NOVA", str_extract(score, "\\d")))) %>%
+  arrange(factor(system, levels = c("Origin", "NOVA", "NOVA (sensitivity)")), score)
+
+diet_scores <- diet_scores %>% select(sample_id, all_of(score_info$score))
+```
+
+
+# Analysis table
+
+ARG metrics come from `Data/Processed/arg_metrics.tsv` (shared by all parts).
+
+
+```{r analysis data}
+analysis_data <- metadata %>%
+  transmute(sample_id, diet_group, sex, age, bmi, reads,
+            log10_depth = log10(reads)) %>%
+  inner_join(arg_metrics, by = "sample_id") %>%
+  inner_join(diet_scores, by = "sample_id")
+
+stopifnot(nrow(analysis_data) == nrow(metadata),
+          !anyNA(select(analysis_data, -bmi)))
+cat("Samples:", nrow(analysis_data), "\n")
+cat("Samples without BMI (dropped from adjusted models):", analysis_data$sample_id[is.na(analysis_data$bmi)], "\n")
+```
+
+
+# Save
+
+```{r save}
+write_tsv(food_classification, file.path(table_dir, "food_classification.tsv"))
+write_tsv(ffq_day, file.path(table_dir, "ffq_frequency_day.tsv"))
+write_tsv(diet_scores, file.path(table_dir, "diet_scores.tsv"))
+write_tsv(score_info, file.path(table_dir, "score_info.tsv"))
+write_tsv(analysis_data, file.path(table_dir, "analysis_data.tsv"))
+```

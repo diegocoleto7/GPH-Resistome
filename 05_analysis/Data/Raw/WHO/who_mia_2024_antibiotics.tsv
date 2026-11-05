@@ -1,0 +1,93 @@
+antibiotic	who_class	who_category
+Amikacin	Aminoglycosides	CIA
+Apramycin	Aminoglycosides	CIA
+Arbekacin	Aminoglycosides	CIA
+Astromicin	Aminoglycosides	CIA
+Fortimicin	Aminoglycosides	CIA
+Butiromycin	Aminoglycosides	CIA
+Butirosin	Aminoglycosides	CIA
+Dibekacin	Aminoglycosides	CIA
+Gentamicin	Aminoglycosides	CIA
+Isepamicin	Aminoglycosides	CIA
+Kanamycin	Aminoglycosides	CIA
+Lividomycin	Aminoglycosides	CIA
+Neomycin	Aminoglycosides	CIA
+Netilmicin	Aminoglycosides	CIA
+Paromomycin	Aminoglycosides	CIA
+Ribostamycin	Aminoglycosides	CIA
+Sisomicin	Aminoglycosides	CIA
+Streptomycin	Aminoglycosides	CIA
+Tobramycin	Aminoglycosides	CIA
+Unknown Aminoglycoside	Aminoglycosides	CIA
+Hygromycin	Aminoglycosides (not authorized in humans)	Not medically important
+Kasugamycin	Aminoglycosides (not authorized in humans)	Not medically important
+Spectinomycin	Aminocyclitols	IA
+Rifampicin	Ansamycins	CIA
+Azithromycin	Macrolides (14-, 15-, 16-membered ring)	CIA
+Carbomycin	Macrolides (14-, 15-, 16-membered ring)	CIA
+Erythromycin	Macrolides (14-, 15-, 16-membered ring)	CIA
+Oleandomycin	Macrolides (14-, 15-, 16-membered ring)	CIA
+Spiramycin	Macrolides (14-, 15-, 16-membered ring)	CIA
+Tylosin	Macrolides (14-, 15-, 16-membered ring)	CIA
+Telithromycin	Ketolides	Human use only
+Cefepime	Cephalosporins (3rd, 4th generation)	HPCIA
+Cefixime	Cephalosporins (3rd, 4th generation)	HPCIA
+Cefotaxime	Cephalosporins (3rd, 4th generation)	HPCIA
+Ceftazidime	Cephalosporins (3rd, 4th generation)	HPCIA
+Ceftiofur	Cephalosporins (3rd, 4th generation)	HPCIA
+Ceftriaxone	Cephalosporins (3rd, 4th generation)	HPCIA
+Cefotaxime+Clavulanic acid	Cephalosporins (3rd-5th generation) with beta-lactamase inhibitors	Human use only
+Ceftazidime+avibactam	Cephalosporins (3rd-5th generation) with beta-lactamase inhibitors	Human use only
+Ceftazidime+Avibactam	Cephalosporins (3rd-5th generation) with beta-lactamase inhibitors	Human use only
+Cephalothin	Cephalosporins (1st, 2nd generation) and cephamycins	HIA
+Cefoxitin	Cephalosporins (1st, 2nd generation) and cephamycins	HIA
+Ertapenem	Carbapenems	Human use only
+Imipenem	Carbapenems	Human use only
+Meropenem	Carbapenems	Human use only
+Aztreonam	Monobactams	Human use only
+Piperacillin	Anti-pseudomonal penicillins	Human use only
+Ticarcillin	Anti-pseudomonal penicillins	Human use only
+Piperacillin+Clavulanic acid	Anti-pseudomonal penicillins with beta-lactamase inhibitors	Human use only
+Piperacillin+Tazobactam	Anti-pseudomonal penicillins with beta-lactamase inhibitors	Human use only
+Ticarcillin+Clavulanic acid	Anti-pseudomonal penicillins with beta-lactamase inhibitors	Human use only
+Amoxicillin	Penicillins (aminopenicillins)	HIA
+Ampicillin	Penicillins (aminopenicillins)	HIA
+Temocillin	Penicillins (aminopenicillins)	HIA
+Amoxicillin+Clavulanic acid	Penicillins (aminopenicillins with beta-lactamase inhibitors)	HIA
+Ampicillin+Clavulanic acid	Penicillins (aminopenicillins with beta-lactamase inhibitors)	HIA
+Penicillin	Penicillins (narrow spectrum)	HIA
+Unknown Beta-lactam	Beta-lactams (unspecified)	Unclassified
+Ciprofloxacin	Quinolones	HPCIA
+Nalidixic acid	Quinolones	HPCIA
+Fluoroquinolone	Quinolones	HPCIA
+Unknown Quinolone	Quinolones	HPCIA
+Colistin	Polymyxins	HPCIA
+Fosfomycin	Phosphonic acid derivatives	HPCIA
+Vancomycin	Glycopeptides and lipoglycopeptides	Human use only
+Teicoplanin	Glycopeptides and lipoglycopeptides	Human use only
+Linezolid	Oxazolidinones	Human use only
+Tigecycline	Glycylcyclines	Human use only
+Mupirocin	Pseudomonic acids	Human use only
+Doxycycline	Tetracyclines	HIA
+Minocycline	Tetracyclines	HIA
+Tetracycline	Tetracyclines	HIA
+Clindamycin	Lincosamides	HIA
+Lincomycin	Lincosamides	HIA
+Pristinamycin IA	Streptogramins	HIA
+Pristinamycin IIA	Streptogramins	HIA
+Quinupristin	Streptogramins	HIA
+Dalfopristin	Streptogramins	HIA
+Quinupristin+Dalfopristin	Streptogramins	HIA
+Virginiamycin M	Streptogramins	HIA
+Virginiamycin S	Streptogramins	HIA
+Chloramphenicol	Amphenicols	HIA
+Florfenicol	Amphenicols	HIA
+Metronidazole	Nitroimidazoles	HIA
+Fusidic acid	Fusidanes	HIA
+Sulfamethoxazole	Sulfonamides, dihydrofolate reductase inhibitors and combinations	HIA
+Trimethoprim	Sulfonamides, dihydrofolate reductase inhibitors and combinations	HIA
+Tiamulin	Pleuromutilins	IA
+Maduramicin	Ionophores	Not medically important
+Narasin	Ionophores	Not medically important
+Salinomycin	Ionophores	Not medically important
+Bleomycin	Glycopeptide antineoplastic (not an antibacterial)	Unclassified

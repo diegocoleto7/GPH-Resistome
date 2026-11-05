@@ -1,0 +1,218 @@
+---
+title: "Curación de las familias de genes (gene_family) de GPH"
+author: "Diego Coleto"
+date: "2026-10-29"
+output: md_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(here)
+library(knitr)
+options(knitr.kable.NA = "")
+
+clstr_name_length <- 19
+```
+
+Este documento se genera con `knitr::knit` a partir de los datos y del archivo de curación
+(`Data/Raw/Phenotypes/gene_family_curation.tsv`), de modo que cualquier cambio en la regla, en la curación o en
+los datos se refleja aquí al volver a ejecutar `run_all.R`. Las tablas recogen **por qué** cada familia se llama
+como se llama.
+
+# 1. Contexto
+
+GPH cuenta los genes de resistencia (ARG) leídos por lectura a nivel de **familia de genes**. Las variantes de
+ResFinder (`gene_N_acceso`) se agrupan con **CD-HIT al 90 % de identidad** (`resfinder_cdhit90.clstr`), el mismo
+umbral que el proyecto MASTER (Quijada et al., Nat Microbiol 2025; doi:10.1038/s41564-025-02059-8), cuyos datos
+de alimentos usa la parte 4. MASTER nombró sus 729 clusters a mano ("Genefam"): por el gen del cluster cuando hay
+uno solo y, cuando hay varios, por el gen más representativo, la raíz de la familia, el alelo de referencia
+("like") o nombres con barra. Aquí se reproduce esa lógica con una **regla automática sobre nuestra base de
+datos**, sin copiar sus nombres, más una **curación manual mínima y documentada**.
+
+Antes la unidad era `gene_base`: el nombre del gen **representante** del cluster (al 95 % de identidad hasta el
+29/10/2026). El representante lo elige CD-HIT por ser la secuencia más larga, no la más típica, así que a veces
+era un mosaico (tet(S/M) para la familia tet(M)), un alelo arbitrario (blaCTX-M-211 para el grupo CTX-M-1) o
+incluso un gen que no se detecta (dfrA7 para lecturas de dfrA17).
+
+# 2. Decisiones generales
+
+* Umbral de agrupación **90 %**, como MASTER.
+* Nombres **sin el sufijo " like"**.
+* Los clusters con el mismo nombre final se **suman** (como hacían `gene_base` y las Genefam de MASTER).
+* **No** se copian las separaciones manuales de MASTER entre genes ≥ 90 % idénticos (tabla de la sección 4,
+  filas `keep_together`): contar dos veces el mismo gen inflaría la riqueza.
+* SHV y LEN se **separan** dentro del cluster que CD-HIT les asignó en común (única decisión por variante).
+* La unidad se llama `gene_family` en todo el proyecto; `phenotypes_cluster.tsv` la da por variante.
+
+```{r data}
+phen_raw <- read_tsv(here("Data", "Raw", "Phenotypes", "phenotypes.tsv"), show_col_types = FALSE) %>%
+  select(gene, gene_base)
+pc <- read_tsv(here("Data", "Processed", "phenotypes_cluster.tsv"), show_col_types = FALSE) %>%
+  left_join(phen_raw, by = "gene")
+curation <- read_tsv(here("Data", "Raw", "Phenotypes", "gene_family_curation.tsv"), show_col_types = FALSE)
+
+identity <- tibble(line = trimws(readLines(here("Data", "Raw", "Phenotypes", "resfinder_cdhit90.clstr")))) %>%
+  filter(!str_detect(line, "^>Cluster")) %>%
+  transmute(cluster_gene = str_match(line, ">\\s*(.*?)\\.\\.\\.")[, 2],
+            identity = if_else(str_detect(line, "\\*$"), 100, as.numeric(str_extract(line, "[0-9.]+(?=%)"))))
+pc <- pc %>% left_join(identity, by = "cluster_gene")
+
+cluster_rep <- pc %>% filter(is_representative) %>%
+  select(cluster, representative = gene, gene_base_rep = gene_base, cluster_step = naming_step)
+
+# MASTER Genefam per variant: exact variant, else the same gene name without point version
+gene_list <- read_tsv(here("Data", "Raw", "Food_resistome", "gene_list.txt"), show_col_types = FALSE) %>%
+  distinct(Hit, .keep_all = TRUE)
+master_by_name <- gene_list %>% distinct(key = tolower(Genefam), Genefam) %>% distinct(key, .keep_all = TRUE)
+pc <- pc %>%
+  left_join(gene_list %>% select(gene = Hit, master_exact = Genefam), by = "gene") %>%
+  mutate(key = tolower(str_remove(gene_base, "\\.[0-9]+$"))) %>%
+  left_join(master_by_name %>% rename(master_name = Genefam), by = "key") %>%
+  mutate(MASTER = coalesce(master_exact, master_name, "(no está en MASTER)")) %>%
+  select(-key, -master_exact, -master_name)
+stopifnot(nrow(pc) == nrow(phen_raw))
+
+metadata <- read_tsv(here("Data", "Processed", "metadata.tsv"), show_col_types = FALSE)
+hits <- read_tsv(here("Data", "Raw", "Counts", "resfinder_hits_matrix_unclustered.tsv"), show_col_types = FALSE)
+hits_long <- hits %>%
+  pivot_longer(-gene, names_to = "sample_id", values_to = "n") %>%
+  filter(n > 0, sample_id %in% metadata$sample_id) %>%
+  left_join(pc %>% select(gene, gene_base, gene_family, cluster, identity, MASTER), by = "gene")
+stopifnot(!anyNA(hits_long$gene_family))
+total_hits <- sum(hits_long$n)
+
+norm <- function(x) str_remove_all(str_remove(tolower(x), "\\s*like$"), "\\s")
+composition <- function(genes) { t <- sort(table(genes), decreasing = TRUE); paste0(names(t), "×", t, collapse = ", ") }
+fmt_pct <- function(x) if_else(x >= 0.01, sprintf("%.2f", x), if_else(x > 0, "<0.01", "0"))
+```
+
+# 3. La regla y lo que cambia cada paso
+
+Por cluster, en orden:
+
+1. **representative**: el `gene_base` del representante.
+2. **mosaic**: si el representante es un mosaico tet (`tet(.../...)`), el gen no mosaico más frecuente del
+   cluster (o el más frecuente si todos son mosaicos).
+3. **parent**: si un gen del cluster es prefijo de todos los demás (aph(3')-III en aph(3')-IIIa), ese gen,
+   salvo que otro cluster ya use ese nombre.
+4. **root**: si todos los genes comparten raíz de alelo (blaTEM-…) y ningún gen de otro cluster tiene esa raíz,
+   la raíz.
+5. **alias** y **split**: la curación manual de la sección 4.
+
+```{r steps}
+steps <- cluster_rep %>% count(cluster_step, name = "clusters")
+kable(steps, col.names = c("Paso", "Clusters"),
+      caption = sprintf("Base de datos completa: %d variantes, %d clusters, %d familias.",
+                        nrow(pc), n_distinct(pc$cluster), n_distinct(pc$gene_family)))
+```
+
+Todos los clusters cuyo nombre cambia respecto al representante:
+
+```{r renamed}
+rule_reason <- c(mosaic = "Representante mosaico tet: se usa el gen no mosaico dominante (o el mosaico más frecuente).",
+                 parent = "Un gen del cluster es prefijo de todos los demás: se usa el gen padre.",
+                 root = "Todos los genes comparten una raíz de alelo exclusiva de este cluster: se usa la raíz.")
+alias_reason <- curation %>% filter(action == "alias") %>% select(representative = cluster_representative, reason)
+renamed <- pc %>%
+  group_by(cluster) %>%
+  summarise(composition = composition(gene_base), .groups = "drop") %>%
+  inner_join(cluster_rep, by = "cluster") %>%
+  left_join(pc %>% filter(is_representative) %>% select(cluster, gene_family), by = "cluster") %>%
+  filter(cluster_step != "representative") %>%
+  left_join(alias_reason, by = "representative") %>%
+  mutate(reason = coalesce(reason, rule_reason[cluster_step]),
+         composition = str_trunc(composition, 90)) %>%
+  arrange(factor(cluster_step, c("mosaic", "parent", "root", "alias")), gene_family)
+kable(renamed %>% select(cluster, gene_base_rep, gene_family, cluster_step, composition, reason),
+      col.names = c("Cluster", "gene_base (representante)", "gene_family", "Paso", "Composición (gen×variantes)", "Motivo"))
+```
+
+# 4. Decisiones manuales (`gene_family_curation.tsv`)
+
+```{r curation}
+kable(curation %>% select(action, cluster_representative, gene_pattern, gene_family, section, reason, decided),
+      col.names = c("Acción", "Representante del cluster", "Patrón", "gene_family", "Sección", "Motivo", "Fecha"))
+```
+
+* `alias`: el cluster se renombra.
+* `split_by_gene`: las variantes del cluster cuyo `gene_base` casa con el patrón forman su propia familia.
+* `keep_together`: decisión de **no** separar algo que MASTER separa; no modifica nada y queda registrada.
+
+# 5. Tabla gen por gen (familias detectadas en GPH)
+
+Familias con hits en las `r n_distinct(metadata$sample_id)` muestras analizadas cuyo nombre difiere del de su
+representante, o del de MASTER, o que contienen más de una Genefam de MASTER. *Detectado* = genes con más hits;
+*+Riq.* = muestras × genes extra que contaría MASTER si separase la familia como hace él.
+
+```{r gene by gene}
+extra <- hits_long %>%
+  group_by(sample_id, gene_family) %>%
+  summarise(k = n_distinct(MASTER), .groups = "drop") %>%
+  group_by(gene_family) %>%
+  summarise(extra_richness = sum(k - 1), .groups = "drop")
+
+by_family <- hits_long %>%
+  group_by(gene_family) %>%
+  summarise(MASTER = paste(unique(MASTER), collapse = " + "),
+            detected = { h <- sort(tapply(n, gene_base, sum), decreasing = TRUE); paste(head(names(h), 3), collapse = ", ") },
+            variants = n_distinct(gene), genes = n_distinct(gene_base),
+            identity = paste0(round(min(identity), 1), "–", round(max(identity), 1)),
+            pct_hits = sum(n) / total_hits * 100, samples = n_distinct(sample_id),
+            clusters = list(unique(cluster)), .groups = "drop") %>%
+  mutate(gene_base_rep = map_chr(clusters, ~ paste(unique(cluster_rep$gene_base_rep[cluster_rep$cluster %in% .x]), collapse = " + ")),
+         step = map_chr(clusters, ~ paste(unique(cluster_rep$cluster_step[cluster_rep$cluster %in% .x]), collapse = " + ")),
+         n_master = str_count(MASTER, fixed(" + ")) + 1) %>%
+  left_join(extra, by = "gene_family") %>%
+  mutate(differs_rep = gene_base_rep != gene_family,
+         differs_master = n_master > 1 | !map2_lgl(gene_family, MASTER, ~ norm(.x) %in% norm(str_split(.y, fixed(" + "))[[1]])))
+
+kable(by_family %>%
+        filter(differs_rep | differs_master) %>%
+        arrange(desc(n_master > 1), desc(differs_rep), desc(pct_hits)) %>%
+        transmute(MASTER, gene_base_rep, gene_family, step, detected, var_genes = paste(variants, "/", genes),
+                  identity, pct_hits = fmt_pct(pct_hits), samples, extra_richness),
+      col.names = c("MASTER", "gene_base (hoy)", "gene_family", "Paso", "Detectado", "Var. / genes",
+                    "Identidad al rep. (%)", "% hits", "Muestras", "+Riq."))
+```
+
+# 6. Coincidencia con MASTER y efecto en la riqueza
+
+```{r agreement}
+named <- hits_long %>%
+  left_join(cluster_rep %>% select(cluster, gene_base_rep), by = "cluster") %>%
+  filter(MASTER != "(no está en MASTER)")
+agreement <- tibble(
+  Nombres = c("gene_base (representante)", "gene_family (regla + curación)"),
+  `% de hits con el nombre de MASTER` = c(sum(named$n[norm(named$gene_base_rep) == norm(named$MASTER)]),
+                                          sum(named$n[norm(named$gene_family) == norm(named$MASTER)])) / total_hits * 100)
+kable(agreement, digits = 2, caption = "Comparación sin ' like', mayúsculas ni espacios.")
+
+extra_by_diet <- hits_long %>%
+  group_by(sample_id, gene_family) %>%
+  summarise(k = n_distinct(MASTER) - 1, .groups = "drop") %>%
+  group_by(sample_id) %>%
+  summarise(extra = sum(k)) %>%
+  right_join(metadata %>% select(sample_id, diet_group), by = "sample_id") %>%
+  mutate(extra = replace_na(extra, 0)) %>%
+  group_by(diet_group) %>%
+  summarise(`Genes extra por muestra (media)` = mean(extra), `Muestras afectadas` = sum(extra > 0), n = n())
+kable(extra_by_diet, digits = 2,
+      caption = "Riqueza extra que contaría la separación de MASTER (decidido no aplicarla).")
+```
+
+# 7. Tabla completa por cluster
+
+La correspondencia `gene_base` → `gene_family` de los `r n_distinct(pc$cluster)` clusters se exporta a
+`Data/Docs/gene_family_by_cluster.tsv`.
+
+```{r export}
+by_cluster <- pc %>%
+  group_by(cluster) %>%
+  summarise(families = paste(unique(gene_family), collapse = " + "), n_variants = n(),
+            composition = composition(gene_base), .groups = "drop") %>%
+  inner_join(cluster_rep, by = "cluster") %>%
+  select(cluster, representative, gene_base_rep, gene_family = families, naming_step = cluster_step, n_variants, composition)
+write_tsv(by_cluster, here("Data", "Docs", "gene_family_by_cluster.tsv"))
+cat("Exportados", nrow(by_cluster), "clusters.\n")
+```

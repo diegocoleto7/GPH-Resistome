@@ -1,0 +1,293 @@
+---
+title: "02.Translate_ffq"
+author: "Diego Coleto"
+date: "2026-06-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(here)
+```
+
+# Load Data
+
+```{r load data}
+
+ffq <- read_csv(here("Data", "Raw", "Metadata", "df_ffq_cleaned.csv"), show_col_types = FALSE) %>%
+  mutate(sample_id = gsub("-","_",record_id)) %>%
+  select(-(2:29)) %>%
+  mutate(across(-sample_id, ~ replace_na(.x, 1))) %>%
+  select(-hbitos_de_alimentacin_y_frecuencia_de_consumo_ffq_complete, -record_id)
+
+metadata <- read_tsv(here("Data", "Processed", "metadata.tsv"), show_col_types = FALSE)
+
+common_samples <- intersect(metadata$sample_id, ffq$sample_id)
+diff_samples1 <- setdiff(metadata$sample_id, ffq$sample_id)
+diff_samples2 <- setdiff(ffq$sample_id, metadata$sample_id)
+cat("Common samples in metadata and ffq tables:\n", common_samples)
+
+cat("\nSamples in metadata but not in ffq tables:\n", diff_samples1)
+
+cat("\nSamples in ffq tables but not in metadata:\n", diff_samples2)
+
+ffq <- ffq %>% filter(sample_id %in% common_samples)
+
+```
+
+# Translate FFQ variable
+
+```{r traslation dic}
+food_name_map <- c(
+  # Dairy products
+  leche_ent        = "whole_milk",
+  leche_semi       = "semi_skimmed_milk",
+  leche_des        = "skimmed_milk",
+  leche_cond       = "condensed_milk",
+  nata             = "cream",
+  batido           = "milkshake",
+  yogur_ent        = "whole_yogurt",
+  yogur_des        = "skimmed_yogurt",
+  petit            = "petit_suisse",
+  reque            = "cottage_cheese",
+  queso_crem       = "cream_cheese",
+  queso_otro       = "other_cheese",
+  queso_fres       = "fresh_cheese",
+  natillas         = "custard",
+  helado           = "ice_cream",
+  
+  # Plant-based dairy alternatives
+  bebsoja_light    = "unsweetened_soy_drink",
+  bebsoja_az       = "sweetened_soy_drink",
+  bebavena_light   = "unsweetened_oat_drink",
+  bebavena_az      = "sweetened_oat_drink",
+  bebalmend_light  = "unsweetened_almond_drink",
+  bebalmend_az     = "sweetened_almond_drink",
+  bebveg           = "other_plant_based_drink",
+  yogsoja_az       = "sweetened_soy_yogurt",
+  yogsoja_light    = "unsweetened_soy_yogurt",
+  yogcoco_az       = "sweetened_coconut_yogurt",
+  yogcoco_light    = "unsweetened_coconut_yogurt",
+  yogveg           = "other_plant_based_yogurt",
+  queso_soja       = "soy_based_cheese",
+  queso_nuez       = "nut_based_cheese",
+  queso_sojaunt    = "spreadable_soy_based_cheese",
+  queso_vegloncha  = "sliced_plant_based_cheese",
+  queso_vegrall    = "grated_plant_based_cheese",
+  crema_veg        = "plant_based_cream",
+  
+  # Eggs, meat and meat products
+  huevo            = "eggs",
+  aves_piel        = "poultry_with_skin",
+  aves_sin         = "skinless_poultry",
+  ternera          = "beef",
+  cerdo            = "pork",
+  cordero          = "lamb",
+  conejo           = "rabbit",
+  higado_ternera   = "beef_liver",
+  visceras         = "offal",
+  jamon_serr       = "serrano_ham",
+  jamon_york       = "cooked_ham",
+  carne_procesada  = "processed_meat",
+  pate             = "pate",
+  hamburguesa      = "hamburger",
+  tocino           = "bacon",
+  
+  # Fish and seafood
+  pesc_blanco      = "white_fish",
+  pesc_azul        = "oily_fish",
+  pesc_salazon     = "salted_fish",
+  bivalvo          = "bivalves",
+  cefalopodo       = "cephalopods",
+  crustaceo        = "crustaceans",
+  pesc_latanat     = "canned_fish_in_brine",
+  pesc_lataac      = "canned_fish_in_oil",
+  
+  # Legumes and plant-based protein foods
+  lenteja          = "lentils",
+  alubia           = "beans",
+  garbanzo         = "chickpeas",
+  guisante         = "peas",
+  lev_nutr         = "nutritional_yeast",
+  filete_leg       = "legume_based_fillet",
+  soja_text        = "textured_soy_protein",
+  fielte_verd      = "vegetable_based_fillet",
+  seitan           = "seitan",
+  pate_leg         = "legume_based_pate",
+  tofu             = "tofu",
+  tahini           = "tahini",
+  pasta_leg        = "legume_based_pasta",
+  tortilla_veg     = "plant_based_omelette",
+  quiche_veg       = "vegetable_quiche",
+  
+  # Nuts and seeds
+  cacahuete        = "peanuts",
+  cacahuete_frito  = "fried_peanuts",
+  cacahuete_crema  = "peanut_butter",
+  fsecos           = "nuts",
+  fsecos_fritos    = "fried_nuts",
+  semillas         = "seeds",
+  fsecos_crema     = "nut_butter",
+  
+  # Vegetables
+  acelga           = "chard",
+  coles            = "brassica_vegetables",
+  lechuga          = "lettuce",
+  tomate           = "tomato",
+  zanahoria        = "carrot",
+  judiasverde      = "green_beans",
+  berenjena        = "eggplant",
+  pimiento         = "pepper",
+  esparrago        = "asparagus",
+  gazpacho         = "gazpacho",
+  otras_verd       = "other_vegetables",
+  cebolla          = "onion",
+  ajo_diente       = "garlic_cloves",
+  especias         = "spices",
+  champis          = "mushrooms",
+  
+  # Fruits
+  citrico          = "citrus_fruits",
+  platano          = "banana",
+  manzana          = "apple",
+  fresa            = "strawberries",
+  cereza           = "cherries",
+  melocoton        = "peach",
+  sandia           = "watermelon",
+  melon            = "melon",
+  kiwi             = "kiwi",
+  uvas             = "grapes",
+  aceituna         = "olives",
+  fruta_almibar    = "fruit_in_syrup",
+  datil            = "dates",
+  
+  # Cereals, bread and starches
+  pan_blanco       = "white_bread",
+  pan_molde        = "sliced_white_bread",
+  pan_integral     = "whole_grain_bread",
+  pan_molde_int    = "sliced_whole_grain_bread",
+  picos            = "breadsticks",
+  pizza_casera     = "homemade_pizza",
+  pizza_comercial  = "commercial_pizza",
+  pizza_veg        = "plant_based_pizza",
+  cereal_des       = "breakfast_cereals",
+  cereal_des_az    = "sweetened_breakfast_cereals",
+  cereal_integ     = "whole_grain_cereals",
+  cereal_integ_az  = "sweetened_whole_grain_cereals",
+  arroz            = "rice",
+  patata_chip      = "potato_chips",
+  tuberc_fritos    = "fried_tubers",
+  tuberc_cocidos   = "boiled_tubers",
+  pasta            = "pasta",
+  pasta_arroz      = "rice_pasta",
+  pseudocereal     = "pseudocereals",
+  cuscus           = "couscous",
+  germen           = "wheat_germ",
+  
+  # Fats and oils
+  ao               = "olive_oil",
+  aove             = "extra_virgin_olive_oil",
+  aceite_ref       = "refined_oil",
+  margarina        = "margarine",
+  mantequilla      = "butter",
+  manteca          = "lard",
+  
+  # Sweets, bakery and desserts
+  galleta_maria    = "maria_biscuits",
+  galleta_integ    = "whole_grain_biscuits",
+  galleta_choco    = "chocolate_biscuits",
+  bizcocho_cas     = "homemade_cake",
+  croasan          = "croissant",
+  donut            = "doughnut",
+  magdalena        = "muffin",
+  pasteles         = "pastries",
+  churros          = "churros",
+  chocolate        = "chocolate",
+  chocolate_70     = "dark_chocolate_70_percent",
+  cacao_polvo      = "cocoa_powder",
+  cacao_desgrasa   = "defatted_cocoa_powder",
+  turron           = "turron",
+  mantecado        = "mantecados",
+  
+  # Beverages
+  refresco         = "sugar_sweetened_soft_drinks",
+  refresco_zero    = "zero_sugar_soft_drinks",
+  refresco_nc      = "non_cola_soft_drinks",
+  refresco_nc_zero = "zero_sugar_non_cola_soft_drinks",
+  zumo_nat_nar     = "fresh_orange_juice",
+  zumo_nat         = "fresh_fruit_juice",
+  zumo_env         = "packaged_fruit_juice",
+  vino             = "wine",
+  cerveza          = "beer",
+  cerveza_sin      = "alcohol_free_beer",
+  cerveza_00       = "zero_zero_beer",
+  destilados       = "spirits",
+  cafe             = "coffee",
+  cafe_descaf      = "decaffeinated_coffee",
+  infusion         = "herbal_tea",
+  
+  # Prepared foods, sauces and condiments
+  croqueta         = "croquettes",
+  sopa_sobre       = "instant_soup",
+  mostaza          = "mustard",
+  mayonesa         = "mayonnaise",
+  salsa_tomate     = "tomato_sauce",
+  picante          = "hot_sauce",
+  sal              = "salt",
+  palito_pesc      = "fish_sticks",
+  mermelada        = "jam",
+  mermelada_saz    = "no_added_sugar_jam",
+  azucar           = "sugar",
+  miel             = "honey",
+  snacks           = "snacks",
+  
+  # Fermented foods
+  kefir            = "kefir",
+  miso             = "miso",
+  salsa_soja       = "soy_sauce",
+  chucrut          = "sauerkraut",
+  kimchi           = "kimchi",
+  kombucha         = "kombucha",
+  tempeh           = "tempeh",
+  natto            = "natto",
+  encurtidos       = "pickled_vegetables",
+  
+  # Identifier
+  sample_id        = "sample_id"
+)
+
+```
+
+
+```{r dict check}
+missing_from_dictionary <- setdiff(colnames(ffq), names(food_name_map))
+extra_in_dictionary <- setdiff(names(food_name_map), colnames(ffq))
+
+missing_from_dictionary
+extra_in_dictionary
+
+```
+# Rename columns
+
+```{r rename}
+ffq_english <- ffq %>% rename_with(
+    .fn = ~ recode(.x, !!!food_name_map),
+    .cols = everything()) %>%
+  relocate(sample_id)
+```
+
+
+# Save
+```{r save}
+write_tsv(ffq_english, here("Data", "Processed", "ffq_english.tsv"))
+
+# Spanish FFQ code <-> English food name, used to join external classifications
+write_tsv(enframe(food_name_map, name = "code", value = "food") %>% filter(code != "sample_id"),
+          here("Data", "Processed", "ffq_dictionary.tsv"))
+```
+
+

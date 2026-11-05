@@ -1,0 +1,176 @@
+---
+title: "02.Contig_dataset"
+author: "Diego Coleto"
+date: "2026-10-20"
+output: html_document
+---
+
+Analysis tables for the assembly-based resistome.
+
+* `arg_contigs.tsv`: one row per ARG-carrying contig (number of distinct ARGs, multi-ARG flag, WHO critical genes,
+  mobility, host taxonomy).
+* `arg_sample_summary.tsv`: one row per sample (counts and proportions) with metadata and diet scores.
+
+Definitions
+
+* **Multi-ARG contig**: contig carrying ≥ 2 distinct ARGs.
+* **Critical ARG**: variant classified as Human use only, HPCIA or CIA in the WHO MIA List 2024
+  (`Data/Processed/arg_who_classification.tsv`); **highest priority**: Human use only or HPCIA.
+* **Mobile** (`has_mobile_element`, the broad flag): contig with any MAP annotation, structural evidence (repeats,
+  compositional outliers) included. Script 05 builds the strict flag (`mobile_strict`: plasmid, insertion sequence,
+  ICE/IME, prophage or viral sequence). **Plasmid**: geNomad plasmid call on a contig ≥ 5 kb; every plasmid call in
+  these data is on a contig of at least 5,014 bp, so the length rule removes none. These are annotations of the
+  contig; they do not show that the ARG is mobilised or transferred.
+
+Assembly statistics and contig coverage come from `Data/Scripts/07.Assembly_stats.Rmd`.
+
+* **Coverage-weighted abundance** of a set of contigs = Σ(coverage × length) of those contigs / Σ(coverage × length)
+  of the whole assembly × 1e6, i.e. per million coverage-weighted assembled bases (the assembly equivalent of CPM).
+* **ARG hits** = ARG occurrences on contigs; the MAMI breastfeeding study (Samarra et al., Nat Commun 2025) calls
+  these "copies of ARGs". `cov_ARG_copies` sums the coverage of the contig of each hit, so
+  `ARG_copies_per_Mb` = Σ(contig coverage over ARG hits) / coverage-weighted assembled Mb is a
+  **coverage-weighted ARG density** (ARG hits per Mb of coverage-weighted assembly). It depends on assembly and
+  coverage and is not an absolute number of gene copies. The column name is kept because other parts of the
+  project read it.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(here)
+
+table_dir <- here("3.-Assembly_based", "Results", "Tables")
+dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+
+# Data load
+
+```{r data load}
+contig_master <- read_tsv(here("Data", "Processed", "contig_master.tsv"), show_col_types = FALSE)
+arg_who <- read_tsv(here("Data", "Processed", "arg_who_classification.tsv"), show_col_types = FALSE)
+metadata <- read_tsv(here("Data", "Processed", "metadata.tsv"), show_col_types = FALSE)
+diet_scores <- read_tsv(here("1.-FFQ_analysis", "Results", "Tables", "diet_scores.tsv"), show_col_types = FALSE)
+assembly_stats <- read_tsv(here("Data", "Processed", "assembly_stats.tsv"), show_col_types = FALSE)
+contig_coverage <- read_tsv(here("Data", "Processed", "contig_coverage.tsv"), show_col_types = FALSE)
+```
+
+
+# ARG hits
+
+```{r hits}
+arg_hits <- contig_master %>%
+  left_join(arg_who %>% select(gene, who_category, who_classes, who_critical, who_highest_priority),
+            by = c("AMR_variant" = "gene"))
+
+stopifnot(!anyNA(arg_hits$who_category))
+count(arg_hits, who_category)
+```
+
+
+# Contig table
+
+```{r contigs}
+arg_contigs <- arg_hits %>%
+  group_by(sample_id, contig_id) %>%
+  summarise(contig_length = first(contig_length),
+            genus = first(genus),
+            species = first(species),
+            n_ARG_hits = n(),
+            n_ARG = n_distinct(AMR_gene),
+            ARG_combination = paste(sort(unique(AMR_gene)), collapse = " + "),
+            n_critical_ARG = n_distinct(AMR_gene[who_critical]),
+            critical_genes = paste(sort(unique(AMR_gene[who_critical])), collapse = " + "),
+            highest_category = who_category[order(match(who_category, c("Human use only", "HPCIA", "CIA", "HIA", "IA",
+                                                                        "Not medically important", "Unclassified")))][1],
+            is_plasmid = any(is_plasmid),
+            has_mobile_element = any(has_mobile_element),
+            element_types = first(element_types),
+            .groups = "drop") %>%
+  mutate(multi_ARG = n_ARG >= 2,
+         has_critical = n_critical_ARG > 0,
+         has_highest_priority = highest_category %in% c("Human use only", "HPCIA"),
+         critical_genes = na_if(critical_genes, ""),
+         log_contig_length = log(contig_length)) %>%
+  left_join(contig_coverage %>% select(sample_id, contig_id, coverage), by = c("sample_id", "contig_id")) %>%
+  mutate(coverage_bp = coverage * contig_length)
+
+stopifnot(!anyNA(arg_contigs$coverage))
+
+count(arg_contigs, n_ARG)
+arg_contigs %>%
+  group_by(multi_ARG) %>%
+  summarise(contigs = n(), median_length = median(contig_length),
+            critical = mean(has_critical), plasmid = mean(is_plasmid), mobile = mean(has_mobile_element),
+            with_species = mean(!is.na(species)))
+```
+
+
+# Sample table
+
+```{r samples}
+arg_sample_summary <- arg_contigs %>%
+  group_by(sample_id) %>%
+  summarise(n_ARG_contigs = n(),
+            n_multi_ARG_contigs = sum(multi_ARG),
+            n_critical_contigs = sum(has_critical),
+            n_multi_critical_contigs = sum(multi_ARG & has_critical),
+            n_mobile_contigs = sum(has_mobile_element),
+            ARG_contig_Mb = sum(contig_length) / 1e6,
+            # Coverage-weighted bases of each contig set
+            cov_ARG_contigs = sum(coverage_bp),
+            cov_multi_ARG_contigs = sum(coverage_bp[multi_ARG]),
+            cov_critical_contigs = sum(coverage_bp[has_critical]),
+            cov_mobile_contigs = sum(coverage_bp[has_mobile_element]),
+            .groups = "drop") %>%
+  left_join(arg_hits %>%
+              left_join(contig_coverage %>% select(sample_id, contig_id, coverage), by = c("sample_id", "contig_id")) %>%
+              group_by(sample_id) %>%
+              summarise(n_ARG_hits = n(),
+                        n_critical_hits = sum(who_critical),
+                        n_highest_priority_hits = sum(who_highest_priority),
+                        cov_ARG_copies = sum(coverage),
+                        cov_critical_copies = sum(coverage[who_critical]),
+                        .groups = "drop"),
+            by = "sample_id") %>%
+  right_join(metadata %>% transmute(sample_id, diet_group, sex, age, bmi, reads, log10_depth = log10(reads)),
+             by = "sample_id") %>%
+  mutate(across(starts_with("n_"), ~ replace_na(.x, 0)),
+         ARG_contig_Mb = replace_na(ARG_contig_Mb, 0),
+         prop_multi_ARG = n_multi_ARG_contigs / n_ARG_contigs,
+         prop_critical_contigs = n_critical_contigs / n_ARG_contigs,
+         prop_mobile_contigs = n_mobile_contigs / n_ARG_contigs) %>%
+  left_join(diet_scores, by = "sample_id") %>%
+  left_join(assembly_stats, by = "sample_id") %>%
+  mutate(across(starts_with("cov_"), ~ replace_na(.x, 0)),
+         # Abundance per million coverage-weighted assembled bases
+         across(c(cov_ARG_contigs, cov_multi_ARG_contigs, cov_critical_contigs, cov_mobile_contigs),
+                ~ .x / (coverage_weighted_Mb * 1e6) * 1e6, .names = "{str_replace(.col, 'cov_', 'abund_')}"),
+         # Coverage-weighted ARG copies per coverage-weighted assembled Mb
+         ARG_copies_per_Mb = cov_ARG_copies / coverage_weighted_Mb,
+         critical_copies_per_Mb = cov_critical_copies / coverage_weighted_Mb)
+
+stopifnot(!anyNA(arg_sample_summary$assembly_Mb))
+
+cat("Samples:", nrow(arg_sample_summary), "| without ARG contigs:", sum(arg_sample_summary$n_ARG_contigs == 0), "\n")
+```
+
+```{r depth check}
+# Counts depend on sequencing depth; proportions should not (Zaheer et al. 2018)
+arg_sample_summary %>%
+  summarise(across(c(n_ARG_contigs, n_multi_ARG_contigs, prop_multi_ARG, prop_critical_contigs,
+                     abund_ARG_contigs, abund_multi_ARG_contigs, ARG_copies_per_Mb, assembly_Mb, N50),
+                   ~ cor(.x, log10_depth, method = "spearman", use = "complete.obs"))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "spearman_rho_with_depth")
+```
+
+
+# Save
+
+```{r save}
+write_tsv(arg_hits, file.path(table_dir, "arg_hits.tsv"))
+write_tsv(arg_contigs, file.path(table_dir, "arg_contigs.tsv"))
+write_tsv(arg_sample_summary, file.path(table_dir, "arg_sample_summary.tsv"))
+```

@@ -1,0 +1,71 @@
+---
+title: "01.Metadata_cleaning"
+author: "Diego Coleto"
+date: "2026-06-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls())
+
+library(tidyverse)
+library(readxl)
+library(here)
+
+```
+
+
+# Load Data
+
+```{r load data}
+metadata <- read_excel(here("Data", "Raw", "Metadata", "GPH_metadata_completo.xlsx"))
+viromeqc <- read_tsv(here("Data", "Raw", "ViromeQC", "ViromeQC_all_reports.tsv"), show_col_types = FALSE)
+```
+
+
+
+# Cleaning df
+
+```{r df cleaning}
+
+metadata <- metadata %>%
+  # A missing PDI means the FFQ was discarded for implausible total energy intake,
+  # so this is the questionnaire quality filter, not a filter on the index itself.
+  filter(!is.na(PDI)) %>%
+  transmute(sample_id = gsub("-","_", record_id),
+         diet_group = case_when(
+           patrondietet == 1 ~ "Omnivore",
+           patrondietet == 2 ~ "Vegetarian",
+           patrondietet == 3 ~ "Vegan"),
+         sex = case_when(
+           sexo == 0 ~ "Female",
+           sexo == 1 ~ "Male",
+           sexo == 2 ~ "Other"),
+         height = talla,
+         weight = peso,
+         age = edad,
+         metabolic_age = edad_metab,
+         bmi = imc)
+```
+
+
+# Sequencing depth
+
+```{r viromeqc}
+viromeqc <- viromeqc %>%
+  transmute(sample_id = gsub("_hostclean_R1", "", Sample),
+            reads = Reads) %>%
+  filter(sample_id %in% metadata$sample_id)
+
+metadata <- metadata %>%
+  left_join(viromeqc, by = "sample_id")
+
+cat("Samples:", nrow(metadata), "| without reads:", sum(is.na(metadata$reads)), "\n")
+```
+
+# Save results
+```{r save results}
+write_tsv(metadata, here("Data", "Processed", "metadata.tsv"))
+```

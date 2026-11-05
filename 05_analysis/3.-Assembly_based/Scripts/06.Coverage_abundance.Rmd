@@ -1,0 +1,337 @@
+---
+title: "06.Coverage_abundance"
+author: "Diego Coleto"
+date: "2026-10-20"
+output: html_document
+---
+
+Abundance of ARG contigs weighted by contig coverage, and ARG hits by host, antibiotic class and plasmid.
+These quantities depend on assembly and coverage; none of them is an absolute number of gene copies. The objects
+and files keep the word "copies" for continuity with the MAMI study, where it means ARG hits on contigs.
+
+* **Abundance** of a contig set = Σ(coverage × length) / Σ(coverage × length of the whole assembly) × 1e6
+  (per million coverage-weighted assembled bases), computed in `02.Contig_dataset.Rmd`. Coverage is the MEGAHIT
+  k-mer coverage of each contig. Normalising by the whole assembly makes it comparable between samples with different
+  depth or assembly size (the assembly equivalent of CPM; Li et al. 2024 used read-mapping coverage per million).
+* Models as for the ARG load in `0.-Diet_group/Scripts/01.Diet_models.Rmd`:
+  lm(log(abundance) ~ diet group + sex + age + BMI + log10 depth), marginal means and Tukey comparisons;
+  origin / NOVA scores as in part 1 (z-scored, BH within system and outcome).
+  Samples without multi-ARG contigs get half of the smallest non-zero value before the log.
+* **ARG hits** ("copies" in the MAMI breastfeeding study, Nat Commun 2025) = ARG occurrences on contigs:
+  % of hits by antibiotic class, host genus and plasmid location, per diet group. A hit conferring resistance
+  to several classes counts once per class, so `ARG_copies_by_class.tsv` has one row per hit and class.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(here)
+library(emmeans)
+library(ggpubr)
+library(patchwork)
+library(broom)
+
+table_dir <- here("3.-Assembly_based", "Results", "Tables")
+plot_dir <- here("3.-Assembly_based", "Results", "Plots")
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+
+```{r theme set, include=FALSE}
+diet_colors <- c(
+  "Omnivore"   = "#2864A5",
+  "Vegetarian" = "#9C3F90",
+  "Vegan"      = "#B36B32")
+
+system_colors <- c(
+  "Origin" = "#338040",
+  "NOVA"   = "#4B1D6F")
+
+class_colors <- c(
+  "Aminoglycoside"            = "#C49135",
+  "Amphenicol"                = "#2D6A8A",
+  "Beta-lactam"               = "#0F4C81",
+  "Folate pathway antagonist" = "#5B5F97",
+  "Fosfomycin"                = "#765D9A",
+  "Glycopeptide"              = "#B5525C",
+  "Lincosamide"               = "#83558A",
+  "Macrolide"                 = "#D35D90",
+  "Nitroimidazole"            = "#C46D4A",
+  "Oxazolidinone"             = "#D17A45",
+  "Phenicol"                  = "#E0A458",
+  "Pleuromutilin"             = "#4F6D9A",
+  "Polymyxin"                 = "#A98467",
+  "Quinolone"                 = "#346B5B",
+  "Streptogramin A"           = "#7D8597",
+  "Streptogramin B"           = "#8E6B55",
+  "Tetracycline"              = "#789447")
+
+theme_set(
+  theme_minimal(base_size = 10) +
+    theme(
+      plot.title = element_text(face = "bold", size = 11),
+      plot.title.position = "plot",
+      panel.grid.minor = element_blank(),
+      legend.position = "bottom",
+      legend.title = element_text(face = "bold"),
+      strip.text = element_text(face = "bold"),
+      panel.grid.major.y = element_blank()))
+```
+
+
+# Data load
+
+```{r data load}
+arg_sample_summary <- read_tsv(file.path(table_dir, "arg_sample_summary.tsv"), show_col_types = FALSE)
+arg_hits <- read_tsv(file.path(table_dir, "arg_hits.tsv"), show_col_types = FALSE)
+arg_metrics <- read_tsv(here("Data", "Processed", "arg_metrics.tsv"), show_col_types = FALSE)
+phenotypes <- read_tsv(here("Data", "Raw", "Phenotypes", "phenotypes.tsv"), show_col_types = FALSE)
+score_info <- read_tsv(here("1.-FFQ_analysis", "Results", "Tables", "score_info.tsv"), show_col_types = FALSE) %>%
+  filter(system != "NOVA (sensitivity)")
+
+outcomes <- c(
+  "abund_ARG_contigs"       = "ARG contigs",
+  "abund_multi_ARG_contigs" = "Multi-ARG contigs",
+  "abund_critical_contigs"  = "Contigs with critical ARG",
+  "abund_mobile_contigs"    = "Mobile ARG contigs")
+
+model_data <- arg_sample_summary %>%
+  mutate(diet_group = factor(diet_group, levels = names(diet_colors)),
+         sex = factor(sex, levels = c("Female", "Male")),
+         across(all_of(names(outcomes)), ~ log(.x + min(.x[.x > 0]) / 2), .names = "log_{.col}"),
+         across(all_of(score_info$score), ~ as.numeric(scale(.x)), .names = "{.col}_z")) %>%
+  drop_na(bmi)
+
+summary(arg_sample_summary %>% select(all_of(names(outcomes))))
+cat("Samples without multi-ARG contigs:", sum(arg_sample_summary$abund_multi_ARG_contigs == 0), "\n")
+```
+
+
+# Agreement with the read-based resistome
+
+```{r agreement}
+agreement <- arg_sample_summary %>%
+  select(sample_id, abund_ARG_contigs, ARG_copies_per_Mb) %>%
+  inner_join(arg_metrics, by = "sample_id")
+
+agreement %>%
+  summarise(rho_abundance_vs_CPM = cor(abund_ARG_contigs, total_ARG_CPM, method = "spearman"),
+            rho_copies_vs_CPM = cor(ARG_copies_per_Mb, total_ARG_CPM, method = "spearman"))
+```
+
+
+# Diet group
+
+```{r diet models}
+covariates <- "sex + age + bmi + log10_depth"
+
+diet_fits <- map(names(outcomes), ~ lm(as.formula(paste0("log_", .x, " ~ diet_group + ", covariates)), data = model_data)) %>%
+  set_names(names(outcomes))
+
+diet_estimates <- imap_dfr(diet_fits, ~ emmeans(.x, ~ diet_group) %>%
+                             confint(level = 0.95) %>%
+                             as.data.frame() %>%
+                             transmute(outcome = .y, diet_group, estimate = emmean,
+                                       conf_low = lower.CL, conf_high = upper.CL))
+
+diet_comparisons <- imap_dfr(diet_fits, ~ emmeans(.x, pairwise ~ diet_group, adjust = "tukey")$contrasts %>%
+                               test() %>%
+                               as.data.frame() %>%
+                               separate(contrast, into = c("group1", "group2"), sep = " - ") %>%
+                               transmute(outcome = .y, group1, group2, estimate, SE, p.adj = p.value,
+                                         p.signif = case_when(p.adj < 0.001 ~ "***",
+                                                              p.adj < 0.01 ~ "**",
+                                                              p.adj < 0.05 ~ "*",
+                                                              TRUE ~ "ns"))) %>%
+  as_tibble()
+
+diet_comparisons %>% mutate(outcome = outcomes[outcome]) %>% print(n = Inf)
+```
+
+```{r plot functions}
+set_relative_pvalue_positions <- function(comparison_df,
+                                          estimate_df,
+                                          lower_padding = 0.50,
+                                          bracket_start = 0.12,
+                                          bracket_step = 0.10,
+                                          upper_padding = 0.08) {
+  data_min <- min(estimate_df$conf_low, na.rm = TRUE)
+  data_max <- max(estimate_df$conf_high, na.rm = TRUE)
+  data_range <- data_max - data_min
+
+  if (!is.finite(data_range) || data_range == 0) {
+    data_range <- abs(data_max) * 0.1
+    if (data_range == 0) {
+      data_range <- 1}}
+
+  comparison_df <- comparison_df %>%
+    mutate(y.position = data_max +
+             data_range * bracket_start +
+             data_range * bracket_step * (row_number() - 1))
+
+  y_lower <- data_min - data_range * lower_padding
+  y_upper <- max(comparison_df$y.position, na.rm = TRUE) + data_range * upper_padding
+
+  list(comparison = comparison_df,
+       limits = c(y_lower, y_upper))}
+
+plot_means <- function(outcome_i) {
+  estimate_df <- diet_estimates %>% filter(outcome == outcome_i)
+  positions <- set_relative_pvalue_positions(diet_comparisons %>% filter(outcome == outcome_i), estimate_df)
+
+  ggplot(estimate_df, aes(x = diet_group, y = estimate, colour = diet_group)) +
+    geom_errorbar(aes(ymin = conf_low, ymax = conf_high), width = 0.12, linewidth = 0.9) +
+    geom_point(size = 3) +
+    scale_colour_manual(values = diet_colors, guide = "none") +
+    stat_pvalue_manual(positions$comparison,
+                       xmin = "group1",
+                       xmax = "group2",
+                       y.position = "y.position",
+                       label = "p.signif",
+                       bracket.size = 0.8,
+                       tip.length = 0.01,
+                       size = 4) +
+    coord_cartesian(ylim = positions$limits, clip = "off") +
+    labs(title = outcomes[outcome_i], x = NULL, y = "log(abundance per million assembled bases)") +
+    theme_classic(base_size = 10) +
+    theme(plot.title = element_text(size = 11, face = "bold"),
+          axis.text.x = element_text(face = "bold", colour = unname(diet_colors), size = 9),
+          axis.title.y = element_text(face = "bold", size = 9),
+          axis.line = element_line(linewidth = 0.5),
+          axis.ticks = element_line(linewidth = 0.5),
+          plot.margin = margin(t = 8, r = 5, b = 5, l = 5))
+}
+```
+
+```{r diet plot, warning=FALSE}
+plot_diet <- wrap_plots(map(names(outcomes), plot_means), nrow = 1)
+plot_diet
+```
+
+
+# Origin and NOVA scores
+
+```{r score models}
+score_results <- expand_grid(score_info, outcome = names(outcomes)) %>%
+  mutate(fit = map2(score, outcome, function(score, outcome) {
+    lm(as.formula(paste0("log_", outcome, " ~ ", score, "_z + ", covariates)), data = model_data) %>%
+      tidy(conf.int = TRUE) %>%
+      filter(term == paste0(score, "_z")) %>%
+      transmute(estimate, conf_low = conf.low, conf_high = conf.high, p_value = p.value)
+  })) %>%
+  unnest(fit) %>%
+  group_by(system, outcome) %>%
+  mutate(p_adj = p.adjust(p_value, method = "BH")) %>%
+  ungroup() %>%
+  mutate(endpoint = outcomes[outcome])
+
+score_results %>%
+  select(system, label, endpoint, estimate, conf_low, conf_high, p_value, p_adj) %>%
+  arrange(endpoint, p_value) %>%
+  print(n = Inf)
+```
+
+```{r score plot, fig.width = 12, fig.height = 5}
+plot_scores <- score_results %>%
+  mutate(system = factor(system, levels = names(system_colors)),
+         label = fct_rev(fct_inorder(label)),
+         endpoint = factor(endpoint, levels = outcomes)) %>%
+  ggplot(aes(x = estimate, y = label, colour = system)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_errorbar(aes(xmin = conf_low, xmax = conf_high), width = 0.2, orientation = "y") +
+  geom_point(aes(shape = p_adj < 0.05), size = 2.5) +
+  scale_shape_manual(values = c(`FALSE` = 1, `TRUE` = 16), labels = c("q ≥ 0.05", "q < 0.05"), name = NULL) +
+  scale_colour_manual(values = system_colors, name = "Classification") +
+  facet_grid(system ~ endpoint, scales = "free_y", space = "free_y") +
+  labs(x = "Beta for log(abundance) per 1-SD increase", y = NULL)
+
+plot_scores
+```
+
+
+# ARG copies by antibiotic class, host and plasmid
+
+```{r copies}
+copies <- arg_hits %>%
+  left_join(phenotypes %>% select(AMR_variant = gene, antibiotic_class), by = "AMR_variant") %>%
+  mutate(antibiotic_class = str_replace(antibiotic_class, "Tetracyclines", "Tetracycline")) %>%
+  separate_longer_delim(antibiotic_class, delim = ",") %>%
+  mutate(antibiotic_class = str_trim(antibiotic_class),
+         location = if_else(is_plasmid, "Plasmid", "Non-plasmid"),
+         genus = replace_na(genus, "Unassigned")) %>%
+  left_join(arg_sample_summary %>% select(sample_id, diet_group), by = "sample_id") %>%
+  mutate(diet_group = factor(diet_group, levels = names(diet_colors)))
+
+copies_class <- copies %>%
+  count(diet_group, location, antibiotic_class, name = "copies") %>%
+  group_by(diet_group) %>%
+  mutate(percentage = copies / sum(copies)) %>%
+  ungroup()
+
+top_hosts <- copies %>% filter(genus != "Unassigned") %>% count(genus, sort = TRUE) %>% slice_head(n = 12) %>% pull(genus)
+
+copies_host <- copies %>%
+  distinct(sample_id, contig_id, AMR_start, AMR_gene, diet_group, genus, location) %>%
+  mutate(genus = case_when(genus %in% top_hosts ~ genus, genus == "Unassigned" ~ "Unassigned", TRUE ~ "Other genera")) %>%
+  count(diet_group, genus, location, name = "copies") %>%
+  group_by(diet_group) %>%
+  mutate(percentage = copies / sum(copies)) %>%
+  ungroup()
+
+copies_class %>%
+  group_by(diet_group, location) %>%
+  summarise(copies = sum(copies), percentage = sum(percentage), .groups = "drop")
+```
+
+```{r copies plots, fig.width = 12, fig.height = 6}
+plot_copies_class <- copies_class %>%
+  mutate(antibiotic_class = fct_reorder(antibiotic_class, copies, .fun = sum)) %>%
+  ggplot(aes(x = diet_group, y = percentage, fill = antibiotic_class)) +
+  geom_col(width = 0.72, colour = "white", linewidth = 0.2) +
+  facet_wrap(~ location) +
+  scale_fill_manual(values = class_colors, name = "Antibiotic class") +
+  scale_y_continuous(labels = scales::label_percent(accuracy = 1), expand = expansion(mult = c(0, 0.02))) +
+  labs(x = NULL, y = "% of ARG hits in each diet group") +
+  theme_bw(base_size = 10) +
+  theme(axis.text.x = element_text(face = "bold", colour = unname(diet_colors)),
+        panel.grid.major.x = element_blank(), panel.grid.minor = element_blank(), legend.position = "right")
+
+host_levels <- c(rev(top_hosts), "Other genera", "Unassigned")
+host_colors <- c(setNames(c("#0F4C81", "#C49135", "#4C956C", "#A23E48", "#765D9A", "#2D6A8A",
+                            "#E0A458", "#789447", "#C46D4A", "#5B5F97", "#D35D90", "#346B5B")[seq_along(top_hosts)],
+                          top_hosts),
+                 "Other genera" = "#8E8E8E", "Unassigned" = "#D0D0D0")
+
+plot_copies_host <- copies_host %>%
+  mutate(genus = factor(genus, levels = rev(host_levels))) %>%
+  ggplot(aes(x = diet_group, y = percentage, fill = genus)) +
+  geom_col(width = 0.72, colour = "white", linewidth = 0.2) +
+  facet_wrap(~ location) +
+  scale_fill_manual(values = host_colors, name = "Host genus") +
+  scale_y_continuous(labels = scales::label_percent(accuracy = 1), expand = expansion(mult = c(0, 0.02))) +
+  labs(x = NULL, y = "% of ARG hits in each diet group") +
+  theme_bw(base_size = 10) +
+  theme(axis.text.x = element_text(face = "bold", colour = unname(diet_colors)),
+        panel.grid.major.x = element_blank(), panel.grid.minor = element_blank(), legend.position = "right",
+        legend.text = element_text(face = "italic"))
+
+plot_copies_class / plot_copies_host
+```
+
+
+# Save
+
+```{r save}
+write_tsv(diet_estimates, file.path(table_dir, "abundance_diet_estimates.tsv"))
+write_tsv(diet_comparisons, file.path(table_dir, "abundance_diet_comparisons.tsv"))
+write_tsv(score_results, file.path(table_dir, "abundance_scores.tsv"))
+write_tsv(copies_class, file.path(table_dir, "ARG_copies_by_class.tsv"))
+write_tsv(copies_host, file.path(table_dir, "ARG_copies_by_host.tsv"))
+
+ggsave(file.path(plot_dir, "Abundance_by_diet.png"), plot_diet, width = 13, height = 5, dpi = 600, bg = "white")
+ggsave(file.path(plot_dir, "Abundance_by_scores.png"), plot_scores, width = 12, height = 5, dpi = 600, bg = "white")
+ggsave(file.path(plot_dir, "ARG_copies_by_class.png"), plot_copies_class, width = 12, height = 6, dpi = 600, bg = "white")
+ggsave(file.path(plot_dir, "ARG_copies_by_host.png"), plot_copies_host, width = 12, height = 6, dpi = 600, bg = "white")
+```

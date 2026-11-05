@@ -1,0 +1,184 @@
+---
+title: "00.Cluster_phenotypes"
+author: "Diego Coleto"
+date: "2026-10-29"
+output: html_document
+---
+
+Joins the ResFinder phenotype table to the CD-HIT gene clusters (90 % identity, `resfinder_cdhit90.clstr`, the
+same threshold as the MASTER food resistome, Quijada et al. 2025) and names every cluster as a **gene family**.
+`gene_family` is the unit of every ARG metric in the project, and the same clustering is what allows the
+MASTER gene list to be applied family by family in `06.ARG_WHO_classification.Rmd`.
+
+Naming, in order (decisions and gene-by-gene tables in `Data/Docs/Gene_family_curation.md`):
+
+1. **representative**: the `gene_base` of the cluster representative;
+2. **mosaic**: if the representative is a tet mosaic (`tet(.../...)`), the most frequent non-mosaic gene of the
+   cluster, or its most frequent gene if all are mosaics;
+3. **parent**: if one gene of the cluster is a prefix of all the others (aph(3')-III in aph(3')-IIIa), that gene,
+   unless another cluster already carries that name;
+4. **root**: if all genes share one allele root (blaTEM-...) and no gene of any other cluster has that root,
+   the root;
+5. **curation** (`Data/Raw/Phenotypes/gene_family_curation.tsv`): manual aliases for clusters whose name was
+   an arbitrary or wrong allele, and the split of SHV from LEN variants in the blaLEN3 cluster, the only
+   assignment made per variant instead of per cluster.
+
+Clusters or variants that end with the same name are summed downstream.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls())
+
+library(tidyverse)
+library(here)
+
+# CD-HIT truncates sequence names to this many characters in the .clstr file
+clstr_name_length <- 19
+```
+
+# Parse CD-HIT clusters
+
+```{r clusters}
+cluster_raw <- tibble(
+  line = readLines(here("Data", "Raw", "Phenotypes", "resfinder_cdhit90.clstr"), warn = FALSE)
+) %>%
+  mutate(line = trimws(line))
+
+cluster_members <- cluster_raw %>%
+  mutate(
+    cluster = if_else(
+      str_detect(line, "^>Cluster\\s+"),
+      as.integer(str_match(line, "^>Cluster\\s+(\\d+)")[, 2]),
+      NA_integer_
+    )
+  ) %>%
+  fill(cluster) %>%
+  filter(!str_detect(line, "^>Cluster\\s+"))
+
+parsed_lines <- str_match(
+  cluster_members$line,
+  "^\\s*(\\d+)\\s+(\\d+)nt,\\s+>(.*?)\\.\\.\\.\\s*(.*)\\s*$"
+)
+
+cluster_members <- cluster_members %>%
+  mutate(
+    cluster_gene = parsed_lines[, 4],
+    # El asterisco identifica al representante
+    is_representative = parsed_lines[, 5] == "*"
+  ) %>%
+  select(cluster, cluster_gene, is_representative)
+
+cat("Clusters:", n_distinct(cluster_members$cluster), "| sequences:", nrow(cluster_members), "\n")
+```
+
+# Join with phenotypes
+
+```{r join}
+phenotypes <- read_tsv(here("Data", "Raw", "Phenotypes", "phenotypes.tsv"), show_col_types = FALSE)
+
+stopifnot(!anyDuplicated(str_sub(phenotypes$gene, 1, clstr_name_length)))
+
+phenotypes_complete <- phenotypes %>%
+  mutate(phenotype_row_id = row_number(),
+         cluster_gene = str_sub(gene, 1, clstr_name_length)) %>%
+  left_join(cluster_members, by = "cluster_gene", relationship = "one-to-one") %>%
+  relocate(cluster_gene, .after = cluster)
+
+cat("Genes without cluster:", sum(is.na(phenotypes_complete$cluster)), "\n")
+stopifnot(!anyNA(phenotypes_complete$cluster))
+```
+
+# Gene family names (rule)
+
+```{r naming rule}
+is_mosaic <- function(gene) str_detect(gene, "^tet\\(.*/.*\\)")
+allele_root <- function(gene) str_remove(str_remove(gene, "-?[0-9]+[A-Za-z]?$"), "[.-]$")
+# Most frequent gene, or NA when the top count is tied
+most_frequent <- function(gene) {
+  counts <- sort(table(gene), decreasing = TRUE)
+  if (length(counts) == 0 || (length(counts) > 1 && counts[1] == counts[2])) NA_character_ else names(counts)[1]
+}
+
+rule_names <- phenotypes_complete %>%
+  group_by(cluster) %>%
+  summarise(
+    representative = gene_base[is_representative][1],
+    mosaic_name = if (is_mosaic(representative)) {
+      coalesce(most_frequent(gene_base[!is_mosaic(gene_base)]), gene_base[!is_mosaic(gene_base)][1],
+               most_frequent(gene_base), representative)
+    } else NA_character_,
+    parent = {
+      genes <- unique(gene_base)
+      parents <- genes[map_lgl(genes, ~ all(str_starts(genes, fixed(.x))))]
+      if (length(genes) > 1 && length(parents) == 1) parents else NA_character_
+    },
+    n_genes = n_distinct(gene_base),
+    root = if (n_distinct(allele_root(gene_base)) == 1) allele_root(gene_base[1]) else NA_character_,
+    .groups = "drop") %>%
+  mutate(mosaic_name = na_if(mosaic_name, representative),
+         name_12 = coalesce(mosaic_name, representative))
+
+# A parent name or a root is used only if no other cluster already has it
+other_names <- function(name, this_cluster) name %in% rule_names$name_12[rule_names$cluster != this_cluster]
+gene_roots <- phenotypes_complete %>% distinct(cluster, root = allele_root(gene_base))
+root_elsewhere <- function(root, this_cluster) root %in% gene_roots$root[gene_roots$cluster != this_cluster]
+
+rule_names <- rule_names %>%
+  mutate(use_parent = !is.na(parent) & parent != name_12 & !map2_lgl(parent, cluster, other_names),
+         use_root = is.na(mosaic_name) & !use_parent & !is.na(root) & root != name_12 & n_genes >= 2 & nchar(root) >= 3 &
+           !map2_lgl(root, cluster, root_elsewhere),
+         gene_family = case_when(use_parent ~ parent, use_root ~ root, TRUE ~ name_12),
+         naming_step = case_when(use_parent ~ "parent", use_root ~ "root",
+                                 !is.na(mosaic_name) ~ "mosaic", TRUE ~ "representative"))
+
+count(rule_names, naming_step)
+rule_names %>% filter(naming_step != "representative") %>% select(cluster, representative, gene_family, naming_step)
+```
+
+# Manual curation
+
+```{r curation}
+curation <- read_tsv(here("Data", "Raw", "Phenotypes", "gene_family_curation.tsv"), show_col_types = FALSE)
+
+representatives <- phenotypes_complete %>% filter(is_representative) %>% select(cluster, cluster_representative = gene)
+curation <- curation %>% left_join(representatives, by = "cluster_representative", relationship = "many-to-one")
+
+# Every curation row must point at an existing cluster representative
+stopifnot(!anyNA(curation$cluster))
+
+aliases <- curation %>% filter(action == "alias")
+stopifnot(!anyDuplicated(aliases$cluster))
+rule_names <- rule_names %>%
+  left_join(aliases %>% select(cluster, alias = gene_family), by = "cluster") %>%
+  mutate(naming_step = if_else(!is.na(alias), "alias", naming_step),
+         gene_family = coalesce(alias, gene_family)) %>%
+  select(-alias)
+
+# An alias must not take the name of a cluster that is not itself curated
+uncurated <- rule_names %>% filter(!cluster %in% aliases$cluster)
+stopifnot(!any(aliases$gene_family %in% uncurated$gene_family))
+
+phenotypes_complete <- phenotypes_complete %>%
+  left_join(rule_names %>% select(cluster, gene_family, naming_step), by = "cluster")
+
+# Per-variant splits: variants of the cluster matching the pattern take their own family
+splits <- curation %>% filter(action == "split_by_gene")
+for (i in seq_len(nrow(splits))) {
+  moved <- phenotypes_complete$cluster == splits$cluster[i] &
+    str_detect(phenotypes_complete$gene_base, splits$gene_pattern[i])
+  cat("Split", splits$cluster_representative[i], ":", sum(moved), "variants ->", splits$gene_family[i], "\n")
+  stopifnot(sum(moved) > 0)
+  phenotypes_complete$gene_family[moved] <- splits$gene_family[i]
+  phenotypes_complete$naming_step[moved] <- "split"
+}
+
+stopifnot(!anyNA(phenotypes_complete$gene_family))
+cat("Variants:", nrow(phenotypes_complete), "| clusters:", n_distinct(phenotypes_complete$cluster),
+    "| gene families:", n_distinct(phenotypes_complete$gene_family), "\n")
+phenotypes_complete %>% distinct(cluster, naming_step) %>% count(naming_step)
+```
+
+```{r save}
+write_tsv(phenotypes_complete %>% select(-gene_base) %>% relocate(gene_family, naming_step, .after = gene),
+          here("Data", "Processed", "phenotypes_cluster.tsv"))
+```

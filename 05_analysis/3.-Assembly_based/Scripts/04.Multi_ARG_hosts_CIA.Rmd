@@ -1,0 +1,398 @@
+---
+title: "04.Multi_ARG_hosts_CIA"
+author: "Diego Coleto"
+date: "2026-10-20"
+output: html_document
+---
+
+Multi-ARG contigs (≥ 2 distinct ARGs): bacterial hosts, ARG combinations, WHO critical ARGs and mobility.
+
+1. Are multi-ARG contigs enriched in critical ARGs, plasmids and mobile elements compared with single-ARG contigs?
+   Logistic mixed models at contig level: outcome ~ multi-ARG + log(contig length) + (1 | sample).
+   The contrast is between contigs of the same samples, so sample-level covariates (sex, age, BMI, depth) are
+   not added: they do not vary between the contigs being compared and the sample random effect absorbs
+   between-sample differences in carriage.
+2. Which hosts carry multi-ARG contigs: genus enrichment among ARG contigs with the same mixed model
+   (multi-ARG ~ genus + log(contig length) + (1 | sample)), because contigs are nested in participants; BH.
+3. Recurrent ARG combinations: hosts, critical genes, mobility and diet groups (alluvial plot and table).
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(here)
+library(glmmTMB)
+library(broom.mixed)
+library(ggalluvial)
+
+table_dir <- here("3.-Assembly_based", "Results", "Tables")
+plot_dir <- here("3.-Assembly_based", "Results", "Plots")
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+
+```{r theme set, include=FALSE}
+diet_colors <- c(
+  "Omnivore"   = "#2864A5",
+  "Vegetarian" = "#9C3F90",
+  "Vegan"      = "#B36B32")
+
+category_colors <- c(
+  "Human use only" = "#A23E48",
+  "HPCIA"          = "#C46D4A",
+  "CIA"            = "#E0A458",
+  "HIA"            = "#4F6D9A",
+  "Unclassified"   = "#B8B8B8")
+
+taxa_palette <- c("#0F4C81", "#C49135", "#4C956C", "#A23E48", "#765D9A", "#2D6A8A",
+                  "#E0A458", "#789447", "#C46D4A", "#5B5F97", "#D35D90", "#346B5B")
+other_color <- "#B8B8B8"
+
+theme_set(
+  theme_minimal(base_size = 10) +
+    theme(
+      plot.title = element_text(face = "bold", size = 11),
+      plot.title.position = "plot",
+      panel.grid.minor = element_blank(),
+      legend.position = "bottom",
+      legend.title = element_text(face = "bold"),
+      strip.text = element_text(face = "bold"),
+      panel.grid.major.y = element_blank()))
+```
+
+
+# Data load
+
+```{r data load}
+arg_contigs <- read_tsv(file.path(table_dir, "arg_contigs.tsv"), show_col_types = FALSE)
+arg_hits <- read_tsv(file.path(table_dir, "arg_hits.tsv"), show_col_types = FALSE)
+metadata <- read_tsv(here("Data", "Processed", "metadata.tsv"), show_col_types = FALSE)
+
+arg_contigs <- arg_contigs %>%
+  left_join(metadata %>% select(sample_id, diet_group), by = "sample_id") %>%
+  mutate(diet_group = factor(diet_group, levels = names(diet_colors)),
+         contig_type = if_else(multi_ARG, "Multi-ARG", "Single ARG"),
+         genus = replace_na(genus, "Unassigned"))
+
+multi_contigs <- arg_contigs %>% filter(multi_ARG)
+cat("Multi-ARG contigs:", nrow(multi_contigs), "in", n_distinct(multi_contigs$sample_id), "samples\n")
+```
+
+
+# 1. Multi-ARG vs single-ARG contigs
+
+```{r enrichment models}
+enrichment_outcomes <- c(
+  "has_critical"         = "Critical ARG",
+  "has_highest_priority" = "Highest-priority ARG",
+  "is_plasmid"           = "Plasmid",
+  "has_mobile_element"   = "Mobile element")
+
+enrichment <- imap_dfr(enrichment_outcomes, function(label, outcome) {
+  # Critical carriage is partly by construction on multi-ARG contigs: the model also reports it per ARG count
+  fit <- glmmTMB(as.formula(paste(outcome, "~ multi_ARG + log_contig_length + (1 | sample_id)")),
+                 data = arg_contigs, family = binomial)
+  tidy(fit, effects = "fixed", exponentiate = TRUE, conf.int = TRUE) %>%
+    filter(term == "multi_ARGTRUE") %>%
+    transmute(outcome = label, odds_ratio = estimate, conf_low = conf.low, conf_high = conf.high, p_value = p.value)
+}) %>%
+  mutate(p_adj = p.adjust(p_value, method = "BH"),
+         # "Mobile element" here is the broad flag: any MAP annotation on the contig
+         outcome_definition = c("At least one WHO-critical ARG (CIA, HPCIA or human use only)",
+                                "At least one ARG for HPCIA or human-use-only antimicrobials",
+                                "Contig classified as plasmid by geNomad",
+                                "Any MGE annotation from MAP (broad flag)"))
+
+enrichment_descriptive <- arg_contigs %>%
+  group_by(contig_type) %>%
+  summarise(contigs = n(), samples = n_distinct(sample_id), across(all_of(names(enrichment_outcomes)), mean)) %>%
+  pivot_longer(-c(contig_type, contigs, samples), names_to = "outcome", values_to = "proportion") %>%
+  mutate(outcome = enrichment_outcomes[outcome])
+
+enrichment
+```
+
+The same enrichment for the complementary MASTER CIA gene list (`Data/Scripts/06`), on the variant each hit
+matched.
+
+```{r master enrichment}
+master_variants <- read_tsv(here("Data", "Processed", "arg_cia_list_mapping.tsv"), show_col_types = FALSE) %>%
+  filter(!is.na(gene)) %>%
+  distinct(gene) %>%
+  pull(gene)
+arg_hits <- arg_hits %>% mutate(master_cia = AMR_variant %in% master_variants)
+arg_contigs <- arg_contigs %>%
+  left_join(arg_hits %>% group_by(sample_id, contig_id) %>% summarise(has_master_cia = any(master_cia), .groups = "drop"),
+            by = c("sample_id", "contig_id"))
+stopifnot(!anyNA(arg_contigs$has_master_cia))
+
+fit_master <- glmmTMB(has_master_cia ~ multi_ARG + log_contig_length + (1 | sample_id), data = arg_contigs,
+                      family = binomial)
+master_enrichment <- tidy(fit_master, effects = "fixed", exponentiate = TRUE, conf.int = TRUE) %>%
+  filter(term == "multi_ARGTRUE") %>%
+  transmute(outcome = "MASTER CIA ARG", odds_ratio = estimate, conf_low = conf.low, conf_high = conf.high,
+            p_value = p.value, converged = isTRUE(fit_master$sdr$pdHess))
+master_per_hit <- arg_hits %>%
+  left_join(arg_contigs %>% select(sample_id, contig_id, contig_type), by = c("sample_id", "contig_id")) %>%
+  group_by(contig_type) %>%
+  summarise(ARG_hits = n(), master_cia = mean(master_cia), .groups = "drop")
+master_enrichment
+master_per_hit
+```
+
+## Is the critical-ARG enrichment just combinatorics?
+
+A contig carrying two ARGs has two chances of one of them being critical, so part of the odds ratio above is
+arithmetic rather than biology. Two checks:
+
+1. **Per ARG, not per contig.** The fraction of individual ARG hits that are critical cannot be inflated by
+   the number of genes on the contig.
+2. **Permutation null.** Reshuffle which ARG hits land on which contig while keeping each contig's number of
+   ARGs, and recompute the odds ratio. The null is the enrichment expected from counting alone.
+   - Statistic: crude odds ratio of carrying at least one WHO-critical ARG, multi-ARG vs single-ARG contigs.
+   - Permuted: the WHO-critical labels of the 3,074 ARG hits, pooled across all participants.
+   - Held fixed: the number of hits on each contig (so each contig's multi-ARG status) and the total number of
+     critical hits.
+   - Null hypothesis: critical hits fall on contigs independently of how many ARGs the contig carries.
+   - The pooled null ignores that critical genes are commoner in some participants than in others. A
+     sensitivity null permutes the labels within each participant only, which also holds fixed each
+     participant's number of critical hits.
+
+```{r per gene}
+# Fraction of the ARG hits that are critical, single vs multi-ARG contigs
+hits_by_type <- arg_hits %>%
+  left_join(arg_contigs %>% select(sample_id, contig_id, contig_type), by = c("sample_id", "contig_id")) %>%
+  group_by(contig_type) %>%
+  summarise(ARG_hits = n(), critical = mean(who_critical), highest_priority = mean(who_highest_priority))
+hits_by_type
+```
+
+```{r permutation null}
+set.seed(1)
+n_permutations <- 999
+
+hit_key <- arg_hits %>%
+  select(sample_id, contig_id, who_critical) %>%
+  left_join(arg_contigs %>% select(sample_id, contig_id, multi_ARG), by = c("sample_id", "contig_id"))
+contig_sizes <- hit_key %>%
+  count(sample_id, contig_id, name = "n_hits") %>%
+  left_join(arg_contigs %>% select(sample_id, contig_id, multi_ARG), by = c("sample_id", "contig_id"))
+
+crude_odds_ratio <- function(multi, critical) {
+  tab <- table(factor(multi, c(FALSE, TRUE)), factor(critical, c(FALSE, TRUE)))
+  (tab["TRUE", "TRUE"] / tab["TRUE", "FALSE"]) / (tab["FALSE", "TRUE"] / tab["FALSE", "FALSE"])
+}
+
+observed_or <- crude_odds_ratio(arg_contigs$multi_ARG, arg_contigs$has_critical)
+contig_index <- rep(seq_len(nrow(contig_sizes)), contig_sizes$n_hits)
+
+null_or <- replicate(n_permutations, {
+  shuffled <- sample(hit_key$who_critical)
+  crude_odds_ratio(contig_sizes$multi_ARG, tapply(shuffled, contig_index, any))
+})
+
+enrichment_null <- tibble(
+  observed_odds_ratio = observed_or,
+  null_median = median(null_or),
+  null_low = quantile(null_or, 0.025),
+  null_high = quantile(null_or, 0.975),
+  excess_over_null = observed_or / median(null_or),
+  p_empirical = (sum(null_or >= observed_or) + 1) / (n_permutations + 1))
+
+enrichment_null %>% mutate(across(where(is.numeric), ~ signif(.x, 3)))
+
+# Sensitivity: permute within participant. Hits are ordered as contig_sizes (sample, contig) so that the
+# contig index lines up with each hit.
+hit_key_sorted <- hit_key %>% arrange(sample_id, contig_id)
+stopifnot(identical(rle(paste(hit_key_sorted$sample_id, hit_key_sorted$contig_id))$lengths, contig_sizes$n_hits))
+set.seed(2)
+null_or_within <- replicate(n_permutations, {
+  shuffled <- unsplit(lapply(split(hit_key_sorted$who_critical, hit_key_sorted$sample_id),
+                             function(z) z[sample.int(length(z))]),
+                      hit_key_sorted$sample_id)
+  crude_odds_ratio(contig_sizes$multi_ARG, tapply(shuffled, contig_index, any))
+})
+enrichment_null_within <- tibble(
+  null = "Within participant",
+  observed_odds_ratio = observed_or,
+  null_median = median(null_or_within),
+  null_low = quantile(null_or_within, 0.025),
+  null_high = quantile(null_or_within, 0.975),
+  excess_over_null = observed_or / median(null_or_within),
+  p_empirical = (sum(null_or_within >= observed_or) + 1) / (n_permutations + 1))
+enrichment_null_within
+cat("\nAbout", round(median(null_or), 1), "of the odds ratio is expected from gene counting alone;",
+    "the per-ARG comparison (", round(hits_by_type$critical[hits_by_type$contig_type == "Multi-ARG"] * 100, 1),
+    "% vs", round(hits_by_type$critical[hits_by_type$contig_type == "Single ARG"] * 100, 1),
+    "% of hits critical) is not affected by it.\n")
+```
+
+```{r enrichment plot}
+plot_enrichment <- enrichment_descriptive %>%
+  mutate(outcome = factor(outcome, levels = enrichment_outcomes),
+         contig_type = factor(contig_type, levels = c("Single ARG", "Multi-ARG"))) %>%
+  ggplot(aes(x = outcome, y = proportion, fill = contig_type)) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.7, colour = "black", linewidth = 0.3) +
+  geom_text(data = enrichment %>% mutate(outcome = factor(outcome, levels = enrichment_outcomes)),
+            aes(x = outcome, y = 1.02,
+                label = paste0("OR = ", round(odds_ratio, 2),
+                               if_else(p_adj < 0.001, "***", if_else(p_adj < 0.01, "**", if_else(p_adj < 0.05, "*", ""))))),
+            inherit.aes = FALSE, size = 3, vjust = 0) +
+  scale_fill_manual(values = c("Single ARG" = "#B8B8B8", "Multi-ARG" = "#A23E48"), name = NULL) +
+  scale_y_continuous(labels = scales::label_percent(accuracy = 1), limits = c(0, 1.1),
+                     expand = expansion(mult = c(0, 0.02))) +
+  labs(x = NULL, y = "% of ARG contigs",
+       subtitle = "OR: multi-ARG vs single-ARG contigs, adjusted for log(contig length), sample as random effect; BH q") +
+  theme_bw(base_size = 10) +
+  theme(panel.grid.major.x = element_blank(), panel.grid.minor = element_blank(),
+        legend.position = "bottom", plot.subtitle = element_text(size = 9, colour = "grey30"))
+
+plot_enrichment
+```
+
+
+# 2. Hosts of multi-ARG contigs
+
+```{r host enrichment}
+assigned_contigs <- arg_contigs %>% filter(genus != "Unassigned")
+
+# Each genus against all other assigned genera
+fit_host <- function(focal_genus) {
+  fit <- glmmTMB(multi_ARG ~ focal + log_contig_length + (1 | sample_id),
+                 data = assigned_contigs %>% mutate(focal = genus == focal_genus), family = binomial)
+  tidy(fit, effects = "fixed", exponentiate = TRUE, conf.int = TRUE) %>%
+    filter(term == "focalTRUE") %>%
+    transmute(odds_ratio = estimate, conf_low = conf.low, conf_high = conf.high, p_value = p.value)
+}
+
+host_enrichment <- assigned_contigs %>%
+  group_by(genus) %>%
+  summarise(ARG_contigs = n(), multi_ARG_contigs = sum(multi_ARG),
+            samples = n_distinct(sample_id), samples_multi = n_distinct(sample_id[multi_ARG]), .groups = "drop") %>%
+  filter(multi_ARG_contigs >= 3) %>%
+  mutate(prop_multi = multi_ARG_contigs / ARG_contigs,
+         fit = map(genus, fit_host)) %>%
+  unnest(fit) %>%
+  mutate(p_adj = p.adjust(p_value, method = "BH")) %>%
+  arrange(p_value)
+
+host_enrichment
+```
+
+```{r host plot}
+plot_hosts <- host_enrichment %>%
+  mutate(genus = fct_reorder(genus, multi_ARG_contigs),
+         label = paste0(multi_ARG_contigs, "/", ARG_contigs,
+                        if_else(p_adj < 0.05, " *", ""))) %>%
+  ggplot(aes(x = multi_ARG_contigs, y = genus)) +
+  geom_col(aes(fill = prop_multi), colour = "black", linewidth = 0.25, width = 0.7) +
+  geom_text(aes(label = label), hjust = -0.1, size = 3) +
+  scale_fill_gradient(low = "#F3E0E2", high = "#A23E48", labels = scales::label_percent(accuracy = 1),
+                      name = "Multi-ARG / ARG contigs") +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.2))) +
+  labs(x = "Multi-ARG contigs", y = NULL,
+       subtitle = "Genera with ≥ 3 multi-ARG contigs; * enriched vs other genera (mixed logistic model, BH q < 0.05)") +
+  theme_bw(base_size = 10) +
+  theme(axis.text.y = element_text(face = "italic"), panel.grid.major.y = element_blank(),
+        panel.grid.minor = element_blank(), legend.position = "bottom",
+        plot.subtitle = element_text(size = 9, colour = "grey30"))
+
+plot_hosts
+```
+
+
+# 3. ARG combinations
+
+```{r combinations}
+combination_summary <- multi_contigs %>%
+  group_by(ARG_combination) %>%
+  summarise(n_ARG = first(n_ARG),
+            contigs = n(),
+            samples = n_distinct(sample_id),
+            omnivore = sum(diet_group == "Omnivore"),
+            vegetarian = sum(diet_group == "Vegetarian"),
+            vegan = sum(diet_group == "Vegan"),
+            critical_genes = first(critical_genes),
+            highest_category = first(highest_category),
+            plasmid = mean(is_plasmid),
+            mobile = mean(has_mobile_element),
+            hosts = paste(names(sort(table(species), decreasing = TRUE)), collapse = "; "),
+            .groups = "drop") %>%
+  arrange(desc(contigs), desc(samples))
+
+combination_summary %>% slice_head(n = 20)
+```
+
+```{r alluvial, fig.width = 12, fig.height = 8}
+top_genera <- multi_contigs %>% filter(genus != "Unassigned") %>% count(genus, sort = TRUE) %>% slice_head(n = 10) %>% pull(genus)
+top_combinations <- combination_summary %>% filter(contigs >= 3) %>% pull(ARG_combination)
+
+alluvial_data <- multi_contigs %>%
+  mutate(Host = case_when(genus %in% top_genera ~ genus,
+                          genus == "Unassigned" ~ "Unassigned",
+                          TRUE ~ "Other genera"),
+         Combination = if_else(ARG_combination %in% top_combinations, ARG_combination, "Other combinations"),
+         `WHO category` = factor(highest_category, levels = names(category_colors))) %>%
+  count(Host, Combination, `WHO category`, name = "contigs") %>%
+  mutate(Host = factor(Host, levels = c(top_genera, "Other genera", "Unassigned")),
+         Combination = factor(Combination, levels = c(top_combinations, "Other combinations")))
+
+plot_alluvial <- ggplot(alluvial_data,
+                        aes(axis1 = Host, axis2 = Combination, axis3 = `WHO category`, y = contigs)) +
+  geom_alluvium(aes(fill = `WHO category`), width = 1/4, alpha = 0.75, knot.pos = 0.4) +
+  geom_stratum(width = 1/4, fill = "grey95", colour = "grey40", linewidth = 0.3) +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum)), size = 2.6) +
+  scale_x_discrete(limits = c("Host genus", "ARG combination", "Highest WHO category"), expand = c(0.08, 0.08)) +
+  scale_fill_manual(values = category_colors, name = "Highest WHO category", drop = TRUE) +
+  labs(x = NULL, y = "Multi-ARG contigs") +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid = element_blank(), axis.text.x = element_text(face = "bold", size = 10),
+        legend.position = "bottom")
+
+plot_alluvial
+```
+
+```{r combinations by diet}
+# Most frequent combinations: contigs per diet group, as % of the multi-ARG contigs of each diet
+combinations_diet <- multi_contigs %>%
+  filter(ARG_combination %in% head(top_combinations, 12)) %>%
+  count(diet_group, ARG_combination, name = "contigs") %>%
+  left_join(multi_contigs %>% count(diet_group, name = "total"), by = "diet_group") %>%
+  mutate(percentage = contigs / total,
+         ARG_combination = factor(ARG_combination, levels = rev(head(top_combinations, 12))))
+
+plot_combinations_diet <- ggplot(combinations_diet, aes(x = percentage, y = ARG_combination, fill = diet_group)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.75, colour = "black", linewidth = 0.2) +
+  scale_fill_manual(values = diet_colors, name = NULL) +
+  scale_x_continuous(labels = scales::label_percent(accuracy = 1), expand = expansion(mult = c(0, 0.05))) +
+  labs(x = "% of the multi-ARG contigs of each diet group", y = NULL) +
+  theme_bw(base_size = 10) +
+  theme(axis.text.y = element_text(size = 8.5), panel.grid.major.y = element_blank(),
+        panel.grid.minor = element_blank(), legend.position = "bottom")
+
+plot_combinations_diet
+```
+
+
+# Save
+
+```{r save}
+write_tsv(enrichment, file.path(table_dir, "multi_ARG_enrichment.tsv"))
+write_tsv(enrichment_null, file.path(table_dir, "multi_ARG_enrichment_null.tsv"))
+write_tsv(tibble(permutation = seq_along(null_or), odds_ratio = null_or),
+          file.path(table_dir, "multi_ARG_enrichment_null_draws.tsv"))
+write_tsv(hits_by_type, file.path(table_dir, "multi_ARG_critical_per_hit.tsv"))
+write_tsv(enrichment_descriptive, file.path(table_dir, "multi_ARG_enrichment_descriptive.tsv"))
+write_tsv(enrichment_null_within, file.path(table_dir, "multi_ARG_enrichment_null_within.tsv"))
+write_tsv(master_enrichment, file.path(table_dir, "multi_ARG_enrichment_master_cia.tsv"))
+write_tsv(master_per_hit, file.path(table_dir, "multi_ARG_master_cia_per_hit.tsv"))
+write_tsv(host_enrichment, file.path(table_dir, "multi_ARG_host_enrichment.tsv"))
+write_tsv(combination_summary, file.path(table_dir, "multi_ARG_combinations.tsv"))
+
+ggsave(file.path(plot_dir, "Multi_ARG_enrichment.png"), plot_enrichment, width = 7.5, height = 5, dpi = 600, bg = "white")
+ggsave(file.path(plot_dir, "Multi_ARG_hosts.png"), plot_hosts, width = 7.5, height = 6, dpi = 600, bg = "white")
+ggsave(file.path(plot_dir, "Multi_ARG_alluvial.png"), plot_alluvial, width = 12, height = 8, dpi = 600, bg = "white")
+ggsave(file.path(plot_dir, "Multi_ARG_combinations_by_diet.png"), plot_combinations_diet, width = 9, height = 6, dpi = 600, bg = "white")
+```

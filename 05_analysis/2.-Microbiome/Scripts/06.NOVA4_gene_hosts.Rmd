@@ -1,0 +1,340 @@
+---
+title: "06.NOVA4_gene_hosts"
+author: "Diego Coleto"
+date: "2026-10-29"
+output: html_document
+---
+
+Ultra-processed food (NOVA 4) raises the total ARG load (`1.-FFQ_analysis/Scripts/02`, beta = 0.105, q = 0.015).
+This script asks which genes carry that effect and which bacteria host them.
+
+The question is answered on the read-based resistome, which is where the load is measured. Assemblies are used
+only to attribute a bacterial host to each gene family: they recover a minority of the ARG copies, so counting
+load on contigs would discard most of the signal, but a contig is the only place where an ARG and a bacterial
+genome fragment are physically linked.
+
+1. **Gene by gene**: for each gene family present in at least half the cohort, the NOVA 4 effect on its log CPM,
+   with the project covariates and BH correction.
+2. **Host phylum**: the phylum hosting each family on our own ARG-carrying contigs, from the NCBI lineage of the
+   Kraken2 taxon (`Data/Raw/Assembly/Kraken2/taxonkit_results.tsv`), and the test of whether the NOVA 4 effect
+   differs between Bacteroidota-hosted and Bacillota-hosted genes.
+3. **Mediation**: how much of the NOVA 4 to ARG load effect is accounted for by the gut abundance of
+   *Bacteroides* + *Phocaeicola* (MetaPhlAn 4, read-based), with a bootstrap interval.
+
+This is an observational mediation analysis: it describes how much of the association is shared with
+*Bacteroides* abundance, not a causal direct effect.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(here)
+library(broom)
+library(phyloseq)
+library(ggrepel)
+library(patchwork)
+
+table_dir <- here("2.-Microbiome", "Results", "Tables")
+plot_dir <- here("2.-Microbiome", "Results", "Plots")
+dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+covariates <- "sex + age + bmi + log10_depth"
+min_prevalence <- 0.5    # a gene must be present in at least half the cohort to be modelled
+min_host_hits <- 5       # a gene family needs this many classified ARG contigs to be given a host phylum
+n_boot <- 1000
+set.seed(1)
+```
+
+```{r theme set, include=FALSE}
+diet_colors <- c(
+  "Omnivore"   = "#2864A5",
+  "Vegetarian" = "#9C3F90",
+  "Vegan"      = "#B36B32")
+
+host_colors <- c(
+  "Bacteroidota"            = "#1F5C8B",
+  "Bacillota (Firmicutes)"  = "#C98A17",
+  "Other phyla"             = "#6A4C93",
+  "Too few contigs"         = "#B8B8B8")
+
+theme_set(
+  theme_minimal(base_size = 10) +
+    theme(
+      plot.title = element_text(face = "bold", size = 11),
+      plot.title.position = "plot",
+      panel.grid.minor = element_blank(),
+      legend.position = "bottom",
+      legend.title = element_text(face = "bold"),
+      strip.text = element_text(face = "bold")))
+```
+
+
+# Data load
+
+```{r data load}
+gut_cpm <- read_tsv(here("Data", "Processed", "cpm_gene_GPH.tsv"), show_col_types = FALSE)
+metadata <- read_tsv(here("Data", "Processed", "metadata.tsv"), show_col_types = FALSE)
+arg_metrics <- read_tsv(here("Data", "Processed", "arg_metrics.tsv"), show_col_types = FALSE)
+diet_scores <- read_tsv(here("1.-FFQ_analysis", "Results", "Tables", "diet_scores.tsv"), show_col_types = FALSE)
+
+sample_data <- metadata %>%
+  transmute(sample_id,
+            diet_group = factor(diet_group, levels = names(diet_colors)),
+            sex = factor(sex, levels = c("Female", "Male")),
+            age, bmi, log10_depth = log10(reads)) %>%
+  inner_join(diet_scores %>% select(sample_id, nova_4), by = "sample_id") %>%
+  drop_na(bmi) %>%
+  mutate(nova_4_z = as.numeric(scale(nova_4)))
+
+cat("Samples modelled:", nrow(sample_data), "\n")
+
+gene_cpm <- gut_cpm %>%
+  pivot_longer(-gene_family, names_to = "sample_id", values_to = "cpm") %>%
+  inner_join(sample_data, by = "sample_id")
+```
+
+
+# 1. Which genes rise with ultra-processed intake
+
+```{r gene models}
+pseudocount <- min(gene_cpm$cpm[gene_cpm$cpm > 0]) / 2
+
+prevalent_genes <- gene_cpm %>%
+  group_by(gene_family) %>%
+  summarise(gut_prevalence = mean(cpm > 0), .groups = "drop") %>%
+  filter(gut_prevalence >= min_prevalence)
+
+cat("Gene families present in >=", min_prevalence * 100, "% of the cohort:", nrow(prevalent_genes),
+    "of", n_distinct(gene_cpm$gene_family), "\n")
+
+nova4_gene_effects <- map_dfr(prevalent_genes$gene_family, function(gene) {
+  data <- gene_cpm %>% filter(gene_family == gene)
+  lm(as.formula(paste("log(cpm + pseudocount) ~ nova_4_z +", covariates)), data = data) %>%
+    tidy(conf.int = TRUE) %>%
+    filter(term == "nova_4_z") %>%
+    transmute(gene_family = gene, beta = estimate, se = std.error,
+              conf_low = conf.low, conf_high = conf.high, p_value = p.value)
+}) %>%
+  mutate(p_adj = p.adjust(p_value, method = "BH")) %>%
+  left_join(prevalent_genes, by = "gene_family")
+```
+
+
+# 2. Which bacteria host those genes
+
+The host is taken from our own ARG-carrying contigs. Each contig has a Kraken2 taxon, whose NCBI lineage gives
+the phylum; the ResFinder variant on the contig is mapped to its gene family with the same clustering used for
+the read-based CPMs. A family is assigned the phylum holding most of its hits, and only if it has at least
+`r min_host_hits` classified hits.
+
+```{r gene hosts}
+lineage <- read_tsv(here("Data", "Raw", "Assembly", "Kraken2", "taxonkit_results.tsv"),
+                    col_names = c("taxid", "kingdom", "phylum", "class", "order", "family", "genus", "species"),
+                    show_col_types = FALSE) %>%
+  select(taxid, phylum)
+stopifnot(!anyDuplicated(lineage$taxid))
+
+variant_family <- read_tsv(here("Data", "Processed", "phenotypes_cluster.tsv"), show_col_types = FALSE) %>%
+  distinct(AMR_variant = gene, gene_family)
+
+# contig_master holds every ARG hit on the cohort's contigs (the same rows as 3.-Assembly_based arg_hits.tsv,
+# which is built later in the pipeline)
+arg_hits <- read_tsv(here("Data", "Processed", "contig_master.tsv"), show_col_types = FALSE) %>%
+  left_join(variant_family, by = "AMR_variant") %>%
+  left_join(lineage, by = "taxid") %>%
+  mutate(host_phylum = case_when(str_detect(phylum, "^Bacillota") ~ "Bacillota (Firmicutes)",
+                                 phylum == "Bacteroidota" ~ "Bacteroidota",
+                                 is.na(phylum) ~ NA_character_,
+                                 TRUE ~ "Other phyla"))
+
+cat("ARG contig hits:", nrow(arg_hits), "| with a phylum:", sum(!is.na(arg_hits$host_phylum)),
+    "| mapped to a gene family:", sum(!is.na(arg_hits$gene_family)), "\n")
+
+gene_hosts <- arg_hits %>%
+  filter(!is.na(host_phylum), !is.na(gene_family)) %>%
+  count(gene_family, host_phylum, name = "hits") %>%
+  group_by(gene_family) %>%
+  mutate(host_share = hits / sum(hits), host_hits = sum(hits)) %>%
+  slice_max(host_share, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(gene_family,
+            main_host_phylum = if_else(host_hits >= min_host_hits, host_phylum, "Too few contigs"),
+            host_share, host_hits)
+
+nova4_gene_effects <- nova4_gene_effects %>%
+  left_join(gene_hosts, by = "gene_family") %>%
+  mutate(main_host_phylum = factor(replace_na(main_host_phylum, "Too few contigs"),
+                                   levels = names(host_colors)))
+
+nova4_gene_effects %>%
+  arrange(p_value) %>%
+  mutate(across(where(is.double), ~ signif(.x, 3))) %>%
+  print(n = Inf)
+
+count(nova4_gene_effects, main_host_phylum)
+```
+
+```{r host test}
+host_test_data <- nova4_gene_effects %>%
+  filter(main_host_phylum %in% c("Bacteroidota", "Bacillota (Firmicutes)")) %>%
+  mutate(main_host_phylum = droplevels(main_host_phylum))
+
+host_wilcox <- wilcox.test(beta ~ main_host_phylum, data = host_test_data)
+
+nova4_host_phylum_test <- host_test_data %>%
+  group_by(main_host_phylum) %>%
+  summarise(genes = n(), median_beta = median(beta), genes_up = sum(beta > 0), .groups = "drop") %>%
+  mutate(wilcoxon_p = host_wilcox$p.value)
+
+nova4_host_phylum_test
+```
+
+A family is assigned to the phylum holding most of its classified hits, so a family whose hits are split
+between the two phyla, or whose hits are classified only to phylum level, rests on a weaker assignment than
+one whose hits agree. Two sensitivity analyses say whether the contrast depends on any single family: the
+Wilcoxon test is repeated leaving each family out in turn, and again with the least confidently assigned
+family moved to the other phylum.
+
+```{r host sensitivity}
+leave_one_out <- map_dfr(host_test_data$gene_family, function(g) {
+  d <- host_test_data %>% filter(gene_family != g)
+  tibble(analysis = "Leave one out", dropped = g,
+         p_value = wilcox.test(beta ~ droplevels(main_host_phylum), data = d)$p.value)
+})
+
+# The weakest assignment is the family with the smallest majority among its classified hits
+weakest <- host_test_data %>% slice_min(host_share, n = 1, with_ties = FALSE)
+flipped <- host_test_data %>%
+  mutate(main_host_phylum = if_else(gene_family == weakest$gene_family,
+                                    setdiff(levels(main_host_phylum), as.character(weakest$main_host_phylum)),
+                                    as.character(main_host_phylum)))
+
+nova4_host_phylum_sensitivity <- bind_rows(
+  tibble(analysis = "As assigned", dropped = NA_character_, p_value = host_wilcox$p.value),
+  leave_one_out,
+  tibble(analysis = paste0("Weakest assignment (", weakest$gene_family, ", host share ",
+                           signif(weakest$host_share, 3), ") moved to the other phylum"),
+         dropped = NA_character_,
+         p_value = wilcox.test(beta ~ main_host_phylum, data = flipped)$p.value))
+
+cat("Wilcoxon p as assigned:", signif(host_wilcox$p.value, 3),
+    "| leave-one-out range:", signif(min(leave_one_out$p_value), 3), "to",
+    signif(max(leave_one_out$p_value), 3),
+    "| weakest family:", weakest$gene_family, "(host share", signif(weakest$host_share, 3), ")\n")
+nova4_host_phylum_sensitivity %>% arrange(p_value) %>% print(n = 5)
+```
+
+
+# 3. How much of the load effect runs through *Bacteroides*
+
+```{r bacteroides models}
+ps <- readRDS(here("Data", "Processed", "phyloseq_species.rds"))
+abundance <- as(otu_table(ps), "matrix")
+if (!taxa_are_rows(ps)) abundance <- t(abundance)
+abundance <- sweep(abundance, 2, colSums(abundance), "/")
+tax_matrix <- as(tax_table(ps), "matrix")
+bacteroides_taxa <- rownames(tax_matrix)[tax_matrix[, "Genus"] %in% c("Bacteroides", "Phocaeicola")]
+stopifnot(length(bacteroides_taxa) > 0)
+
+load_data <- sample_data %>%
+  inner_join(arg_metrics %>% select(sample_id, log_ARG_load), by = "sample_id") %>%
+  inner_join(tibble(sample_id = colnames(abundance),
+                    bacteroides = colSums(abundance[bacteroides_taxa, , drop = FALSE])), by = "sample_id") %>%
+  mutate(logit_bacteroides = qlogis(pmin(pmax(bacteroides, 0.001), 0.999)))
+
+cat("Bacteroides + Phocaeicola species:", length(bacteroides_taxa),
+    "| median relative abundance:", round(median(load_data$bacteroides) * 100, 1), "%\n")
+
+fit_models <- function(data) list(
+  "NOVA 4 -> Bacteroides"            = lm(as.formula(paste("logit_bacteroides ~ nova_4_z +", covariates)), data),
+  "NOVA 4 -> ARG load"               = lm(as.formula(paste("log_ARG_load ~ nova_4_z +", covariates)), data),
+  "Bacteroides -> ARG load"          = lm(as.formula(paste("log_ARG_load ~ logit_bacteroides +", covariates)), data),
+  "NOVA 4 -> ARG load + Bacteroides" = lm(as.formula(paste("log_ARG_load ~ nova_4_z + logit_bacteroides +",
+                                                           covariates)), data))
+
+attenuation_of <- function(models) {
+  total <- coef(models[["NOVA 4 -> ARG load"]])[["nova_4_z"]]
+  direct <- coef(models[["NOVA 4 -> ARG load + Bacteroides"]])[["nova_4_z"]]
+  1 - direct / total
+}
+
+load_models <- fit_models(load_data)
+attenuation <- attenuation_of(load_models)
+
+# Bootstrap interval for the attenuation (participants resampled with replacement)
+boot_attenuation <- map_dbl(seq_len(n_boot), function(i) {
+  resampled <- load_data[sample(nrow(load_data), replace = TRUE), ]
+  tryCatch(attenuation_of(fit_models(resampled)), error = function(e) NA_real_)
+})
+attenuation_ci <- quantile(boot_attenuation, c(0.025, 0.975), na.rm = TRUE)
+
+nova4_bacteroides_models <- imap_dfr(load_models, ~ tidy(.x, conf.int = TRUE) %>%
+                                       filter(term %in% c("nova_4_z", "logit_bacteroides")) %>%
+                                       mutate(model = .y, .before = 1)) %>%
+  mutate(bacteroides_share_of_nova4_effect = attenuation,
+         share_conf_low = attenuation_ci[[1]],
+         share_conf_high = attenuation_ci[[2]])
+
+nova4_bacteroides_models %>% mutate(across(where(is.double), ~ signif(.x, 3)))
+
+cat("Share of the NOVA 4 -> ARG load effect accounted for by Bacteroides + Phocaeicola:",
+    round(attenuation * 100, 1), "% (bootstrap 95 % CI ",
+    round(attenuation_ci[[1]] * 100, 1), " to ", round(attenuation_ci[[2]] * 100, 1), ")\n", sep = "")
+```
+
+
+# Plot
+
+```{r nova4 plot, fig.width = 9, fig.height = 6.5}
+plot_genes <- nova4_gene_effects %>%
+  mutate(gene_family = fct_reorder(gene_family, beta)) %>%
+  ggplot(aes(x = beta, y = gene_family, colour = main_host_phylum)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_errorbarh(aes(xmin = conf_low, xmax = conf_high), height = 0, linewidth = 0.4) +
+  geom_point(size = 1.6) +
+  scale_colour_manual(values = host_colors, name = "Main host phylum", drop = FALSE) +
+  labs(x = "Change in log CPM per SD of NOVA 4 intake", y = NULL,
+       title = "Ultra-processed intake moves Bacteroidota and Bacillota genes in opposite directions")
+
+plot_phylum <- host_test_data %>%
+  ggplot(aes(x = main_host_phylum, y = beta, colour = main_host_phylum)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_boxplot(outlier.shape = NA, width = 0.55, linewidth = 0.4) +
+  geom_jitter(width = 0.15, size = 1.4, alpha = 0.7) +
+  scale_colour_manual(values = host_colors, guide = "none") +
+  labs(x = NULL, y = "NOVA 4 effect (log CPM per SD)",
+       subtitle = paste0("Wilcoxon p = ", signif(host_wilcox$p.value, 3)))
+
+plot_mediation <- load_data %>%
+  ggplot(aes(x = nova_4_z, y = logit_bacteroides)) +
+  geom_point(aes(colour = diet_group), size = 1.4, alpha = 0.8) +
+  geom_smooth(method = "lm", formula = y ~ x, colour = "grey20", linewidth = 0.6, se = TRUE) +
+  scale_colour_manual(values = diet_colors, name = NULL) +
+  labs(x = "NOVA 4 intake (SD)", y = "Bacteroides + Phocaeicola (logit)",
+       subtitle = paste0("Bacteroides accounts for ", round(attenuation * 100, 1),
+                         " % of the NOVA 4 to ARG load effect"))
+
+plot_nova4 <- plot_genes / (plot_phylum | plot_mediation) +
+  plot_layout(heights = c(1.5, 1)) +
+  plot_annotation(tag_levels = "A")
+
+plot_nova4
+```
+
+
+# Save
+
+```{r save}
+write_tsv(nova4_gene_effects, file.path(table_dir, "nova4_gene_effects.tsv"))
+write_tsv(nova4_host_phylum_test, file.path(table_dir, "nova4_host_phylum_test.tsv"))
+write_tsv(nova4_host_phylum_sensitivity, file.path(table_dir, "nova4_host_phylum_sensitivity.tsv"))
+write_tsv(nova4_bacteroides_models, file.path(table_dir, "nova4_bacteroides_models.tsv"))
+write_tsv(load_data %>% select(sample_id, diet_group, nova_4, nova_4_z, bacteroides, logit_bacteroides,
+                               log_ARG_load),
+          file.path(table_dir, "nova4_bacteroides_samples.tsv"))
+
+ggsave(file.path(plot_dir, "NOVA4_genes_hosts.png"), plot_nova4, width = 9, height = 6.5, dpi = 600, bg = "white")
+```

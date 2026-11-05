@@ -1,0 +1,236 @@
+---
+title: "01.Alpha_diversity"
+author: "Diego Coleto"
+date: "2026-10-20"
+output: html_document
+---
+
+Microbiome alpha diversity by diet group (MetaPhlAn 4, species level).
+
+* MetaPhlAn gives relative abundances, so pseudo-counts are built as MetaPhlAn % × 1e6
+  (the smallest abundance becomes ≥ 1, so no species is lost when rounding).
+* Observed richness, Shannon and Simpson are computed with `phyloseq::estimate_richness`.
+* Models and plots follow `0.-Diet_group/Scripts/01.Diet_models.Rmd`:
+  diet group + sex + age + BMI + log10 sequencing depth, marginal means and Tukey comparisons.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(here)
+library(phyloseq)
+library(ggpubr)
+library(emmeans)
+library(patchwork)
+library(MASS, exclude = "select")
+
+table_dir <- here("2.-Microbiome", "Results", "Tables")
+plot_dir <- here("2.-Microbiome", "Results", "Plots")
+dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+
+# Set plot themes
+
+```{r theme plot}
+diet_colors <- c(
+  "Omnivore"   = "#2864A5",
+  "Vegetarian" = "#9C3F90",
+  "Vegan"      = "#B36B32")
+```
+
+
+# Load data
+
+```{r load data}
+ps <- readRDS(here("Data", "Processed", "phyloseq_species.rds"))
+ps
+```
+
+
+# Alpha diversity
+
+```{r alpha}
+# MetaPhlAn % x 1e6 as pseudo-counts
+ps_counts <- transform_sample_counts(ps, function(x) round(x * 100 * 1e6))
+n_detected <- function(p) colSums(as(otu_table(p), "matrix") > 0)
+stopifnot(identical(n_detected(ps_counts), n_detected(ps)))
+
+alpha_df <- estimate_richness(ps_counts, measures = c("Observed", "Shannon", "Simpson")) %>%
+  rownames_to_column("sample_id") %>%
+  rename(observed = Observed, shannon = Shannon, simpson = Simpson) %>%
+  left_join(as(sample_data(ps), "data.frame") %>% rownames_to_column("sample_id"), by = "sample_id") %>%
+  mutate(diet_group = factor(diet_group, levels = names(diet_colors)),
+         sex = factor(sex, levels = c("Female", "Male")))
+
+summary(alpha_df %>% select(observed, shannon, simpson))
+```
+
+
+# Models
+
+Covariates used in every part of the project: sex + age + BMI + log10 sequencing depth
+(GPH_97 has no BMI and is dropped from the models).
+
+```{r models}
+model_shannon <- lm(shannon ~ diet_group + sex + age + bmi + log10_depth, data = alpha_df)
+
+model_simpson <- lm(simpson ~ diet_group + sex + age + bmi + log10_depth, data = alpha_df)
+
+model_observed <- glm(observed ~ diet_group + sex + age + bmi + log10_depth,
+                      family = poisson(link = "log"),
+                      data = alpha_df)
+```
+
+```{r check dispersion}
+dispersion_observed <- sum(residuals(model_observed, type = "pearson")^2) / df.residual(model_observed)
+cat("Dispersion of the Poisson model for observed richness:", round(dispersion_observed, 2), "\n")
+
+# Species richness is overdispersed: use a negative binomial model instead
+if (dispersion_observed > 1.5) {
+  model_observed <- glm.nb(observed ~ diet_group + sex + age + bmi + log10_depth, data = alpha_df)
+  cat("Negative binomial model used for observed richness\n")
+}
+```
+
+
+# Marginal means estimation and comparison
+
+```{r estimated marginal means}
+get_estimates <- function(model, type = "link") {
+  emmeans(model, ~ diet_group, type = type) %>%
+    confint(level = 0.95) %>%
+    as.data.frame() %>%
+    rename_with(~ "estimate", any_of(c("emmean", "response", "rate"))) %>%
+    rename_with(~ "conf_low", any_of(c("lower.CL", "asymp.LCL"))) %>%
+    rename_with(~ "conf_high", any_of(c("upper.CL", "asymp.UCL"))) %>%
+    select(diet_group, estimate, conf_low, conf_high)
+}
+
+get_comparisons <- function(model, type = "link") {
+  emmeans(model, pairwise ~ diet_group, type = type, adjust = "tukey")$contrasts %>%
+    test() %>%
+    as.data.frame() %>%
+    separate(contrast, into = c("group1", "group2"), sep = " - | / ") %>%
+    mutate(p.adj = p.value,
+           p.signif = case_when(p.adj < 0.001 ~ "***",
+                                p.adj < 0.01 ~ "**",
+                                p.adj < 0.05 ~ "*",
+                                TRUE ~ "ns"))
+}
+
+estimate_shannon <- get_estimates(model_shannon)
+estimate_simpson <- get_estimates(model_simpson)
+estimate_observed <- get_estimates(model_observed, type = "response")
+
+comparison_shannon <- get_comparisons(model_shannon)
+comparison_simpson <- get_comparisons(model_simpson)
+comparison_observed <- get_comparisons(model_observed, type = "response")
+```
+
+```{r estimation results}
+cat("\nMean estimation for observed richness:\n"); print(estimate_observed)
+cat("\nMean estimation for Shannon:\n"); print(estimate_shannon)
+cat("\nMean estimation for Simpson:\n"); print(estimate_simpson)
+
+cat("\nMean comparison for observed richness:\n"); print(comparison_observed)
+cat("\nMean comparison for Shannon:\n"); print(comparison_shannon)
+cat("\nMean comparison for Simpson:\n"); print(comparison_simpson)
+cat("\n p-values adjusted by tukey\n")
+```
+
+
+# Plot means
+
+```{r plot function}
+set_relative_pvalue_positions <- function(comparison_df,
+                                          estimate_df,
+                                          lower_padding = 0.50,
+                                          bracket_start = 0.12,
+                                          bracket_step = 0.10,
+                                          upper_padding = 0.08) {
+  data_min <- min(estimate_df$conf_low, na.rm = TRUE)
+  data_max <- max(estimate_df$conf_high, na.rm = TRUE)
+  data_range <- data_max - data_min
+
+  if (!is.finite(data_range) || data_range == 0) {
+    data_range <- abs(data_max) * 0.1
+    if (data_range == 0) {
+      data_range <- 1}}
+
+  comparison_df <- comparison_df %>%
+    mutate(y.position = data_max +
+             data_range * bracket_start +
+             data_range * bracket_step * (row_number() - 1))
+
+  y_lower <- data_min - data_range * lower_padding
+  y_upper <- max(comparison_df$y.position, na.rm = TRUE) + data_range * upper_padding
+
+  list(comparison = comparison_df,
+       limits = c(y_lower, y_upper))}
+
+plot_means <- function(estimate_df, comparison_df, title, y_label) {
+  positions <- set_relative_pvalue_positions(comparison_df, estimate_df)
+
+  ggplot(estimate_df, aes(x = diet_group, y = estimate, colour = diet_group)) +
+    geom_errorbar(aes(ymin = conf_low, ymax = conf_high),
+                  width = 0.12,
+                  linewidth = 0.9) +
+    geom_point(size = 3) +
+    scale_colour_manual(values = diet_colors, guide = "none") +
+    stat_pvalue_manual(positions$comparison,
+                       xmin = "group1",
+                       xmax = "group2",
+                       y.position = "y.position",
+                       label = "p.signif",
+                       bracket.size = 0.8,
+                       tip.length = 0.01,
+                       size = 4) +
+    coord_cartesian(ylim = positions$limits, clip = "off") +
+    labs(title = title, x = NULL, y = y_label) +
+    theme_classic(base_size = 10) +
+    theme(plot.title = element_text(size = 11, face = "bold"),
+          axis.text.x = element_text(face = "bold", colour = unname(diet_colors), size = 9),
+          axis.title.y = element_text(face = "bold", size = 9),
+          axis.line = element_line(linewidth = 0.5),
+          axis.ticks = element_line(linewidth = 0.5),
+          plot.margin = margin(t = 8, r = 5, b = 5, l = 5))
+}
+```
+
+```{r final plot, warning=FALSE}
+plot_alpha <- (
+  plot_means(estimate_observed, comparison_observed, "Species richness", "Observed species") |
+  plot_means(estimate_shannon, comparison_shannon, "Shannon diversity", "Shannon index") |
+  plot_means(estimate_simpson, comparison_simpson, "Simpson diversity", "Simpson index")
+) +
+  plot_layout(widths = c(1, 1, 1))
+
+plot_alpha
+```
+
+
+# Save
+
+```{r save}
+write_tsv(alpha_df %>% select(sample_id, observed, shannon, simpson),
+          file.path(table_dir, "microbiome_alpha.tsv"))
+
+write_tsv(bind_rows(Observed = comparison_observed, Shannon = comparison_shannon,
+                    Simpson = comparison_simpson, .id = "index"),
+          file.path(table_dir, "alpha_diet_comparisons.tsv"))
+
+# Family and dispersion of each alpha-diversity model, so the Methods can name the model actually fitted
+write_tsv(tibble(index = c("Observed", "Shannon", "Simpson"),
+                 family = c(if (inherits(model_observed, "negbin")) "negative binomial" else "poisson",
+                            "gaussian", "gaussian"),
+                 poisson_dispersion = c(dispersion_observed, NA, NA),
+                 nb_theta = c(if (inherits(model_observed, "negbin")) model_observed$theta else NA, NA, NA),
+                 n = c(nobs(model_observed), nobs(model_shannon), nobs(model_simpson))),
+          file.path(table_dir, "alpha_model_diagnostics.tsv"))
+
+ggsave(file.path(plot_dir, "Alpha_diversity_by_diet.png"), plot_alpha, height = 5, width = 10, dpi = 600)
+```

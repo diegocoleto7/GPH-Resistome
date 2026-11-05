@@ -1,0 +1,292 @@
+---
+title: "05.Mobility_by_diet"
+author: "Diego Coleto"
+date: "2026-10-20"
+output: html_document
+---
+
+Which mobile elements explain the higher proportion of mobile ARG contigs in vegans (`03.Multi_ARG_by_diet.Rmd`),
+and whether the difference is explained by the bacterial hosts.
+
+* MAP annotations are split into **mobile genetic elements** (plasmid, insertion sequence, integron, conjugative
+  integron, prophage, viral sequence) and **structural evidence** (direct / inverted repeats, compositional outliers),
+  which are signatures of past mobility rather than mobile elements themselves.
+* Contig-level logistic mixed models, as in script 03:
+  outcome ~ diet group + log(contig length) + sex + age + BMI + log10 depth + (1 | sample).
+* Host adjustment: the same model adding the host genus (10 most frequent genera, rest pooled).
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(here)
+library(glmmTMB)
+library(broom.mixed)
+library(emmeans)
+
+table_dir <- here("3.-Assembly_based", "Results", "Tables")
+plot_dir <- here("3.-Assembly_based", "Results", "Plots")
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+
+```{r theme set, include=FALSE}
+diet_colors <- c(
+  "Omnivore"   = "#2864A5",
+  "Vegetarian" = "#9C3F90",
+  "Vegan"      = "#B36B32")
+
+theme_set(
+  theme_minimal(base_size = 10) +
+    theme(
+      plot.title = element_text(face = "bold", size = 11),
+      plot.title.position = "plot",
+      panel.grid.minor = element_blank(),
+      legend.position = "bottom",
+      legend.title = element_text(face = "bold"),
+      strip.text = element_text(face = "bold"),
+      panel.grid.major.y = element_blank()))
+```
+
+
+# Data load
+
+```{r data load}
+arg_contigs <- read_tsv(file.path(table_dir, "arg_contigs.tsv"), show_col_types = FALSE)
+arg_sample_summary <- read_tsv(file.path(table_dir, "arg_sample_summary.tsv"), show_col_types = FALSE)
+contig_mge <- read_tsv(here("Data", "Processed", "contig_mge.tsv"), show_col_types = FALSE)
+
+element_groups <- c(
+  "plasmid"                 = "Mobile genetic element",
+  "insertion_sequence"      = "Mobile genetic element",
+  "integron"                = "Mobile genetic element",
+  "conjugative_integron"    = "Mobile genetic element",
+  "prophage"                = "Mobile genetic element",
+  "viral_sequence"          = "Mobile genetic element",
+  "direct_repeat_element"   = "Structural evidence",
+  "inverted_repeat_element" = "Structural evidence",
+  "compositional_outlier"   = "Structural evidence")
+
+# One indicator column per element type
+element_flags <- contig_mge %>%
+  distinct(sample_id, contig_id, element_type) %>%
+  mutate(present = TRUE) %>%
+  pivot_wider(names_from = element_type, values_from = present, values_fill = FALSE)
+
+top_genera <- arg_contigs %>% filter(!is.na(genus)) %>% count(genus, sort = TRUE) %>% slice_head(n = 10) %>% pull(genus)
+
+contig_data <- arg_contigs %>%
+  left_join(element_flags, by = c("sample_id", "contig_id")) %>%
+  mutate(across(any_of(names(element_groups)), ~ replace_na(.x, FALSE)),
+         mobile_strict = if_any(any_of(names(element_groups)[element_groups == "Mobile genetic element"])),
+         structural_only = has_mobile_element & !mobile_strict,
+         host = factor(case_when(genus %in% top_genera ~ genus,
+                                 is.na(genus) ~ "Unassigned",
+                                 TRUE ~ "Other genera"))) %>%
+  inner_join(arg_sample_summary %>%
+               transmute(sample_id,
+                         diet_group = factor(diet_group, levels = names(diet_colors)),
+                         sex = factor(sex, levels = c("Female", "Male")),
+                         age, bmi, log10_depth, assembly_Mb, N50),
+             by = "sample_id") %>%
+  drop_na(bmi)
+
+contig_data %>%
+  group_by(diet_group) %>%
+  summarise(contigs = n(),
+            across(c(has_mobile_element, mobile_strict, structural_only, any_of(names(element_groups))),
+                   ~ round(mean(.x) * 100, 1)))
+```
+
+
+# Element types by diet group
+
+```{r element models}
+covariates <- "log_contig_length + sex + age + bmi + log10_depth"
+
+outcomes <- c(
+  "has_mobile_element" = "Any MAP annotation",
+  "mobile_strict"      = "Mobile genetic element",
+  "structural_only"    = "Structural evidence only",
+  setNames(str_to_sentence(str_replace_all(names(element_groups), "_", " ")), names(element_groups)))
+
+# Only outcomes with enough positive contigs (rarer element types give separated, unstable models)
+outcomes <- outcomes[map_lgl(names(outcomes), ~ sum(contig_data[[.x]]) >= 50)]
+
+fit_diet <- function(outcome, extra = "") {
+  glmmTMB(as.formula(paste(outcome, "~ diet_group +", covariates, extra, "+ (1 | sample_id)")),
+          data = contig_data, family = binomial)
+}
+
+tidy_diet <- function(fit) {
+  tidy(fit, effects = "fixed", exponentiate = TRUE, conf.int = TRUE) %>%
+    filter(str_detect(term, "diet_group")) %>%
+    transmute(contrast = paste(str_remove(term, "diet_group"), "vs Omnivore"),
+              odds_ratio = estimate, conf_low = conf.low, conf_high = conf.high, p_value = p.value)
+}
+
+element_fits <- map(names(outcomes), fit_diet) %>% set_names(names(outcomes))
+
+element_results <- imap_dfr(outcomes, ~ tidy_diet(element_fits[[.y]]) %>% mutate(outcome = .y, label = .x)) %>%
+  mutate(group = case_when(outcome %in% c("has_mobile_element", "mobile_strict", "structural_only") ~ "Summary",
+                           TRUE ~ element_groups[outcome])) %>%
+  group_by(contrast) %>%
+  mutate(p_adj = p.adjust(p_value, method = "BH")) %>%
+  ungroup()
+
+element_results %>% select(label, contrast, odds_ratio, conf_low, conf_high, p_value, p_adj) %>% print(n = Inf)
+
+# Estimated probability for each diet group (other covariates at their mean), as in script 03
+element_estimates <- imap_dfr(element_fits, function(fit, outcome_i) {
+  emmeans(fit, ~ diet_group, type = "response") %>%
+    as.data.frame() %>%
+    transmute(outcome = outcome_i, label = unname(outcomes[[outcome_i]]), diet_group,
+              estimate = prob, conf_low = asymp.LCL, conf_high = asymp.UCL)
+}) %>% as_tibble()
+
+element_estimates %>% mutate(across(where(is.double), ~ round(.x * 100, 1))) %>% print(n = Inf)
+```
+
+The BH family above mixes the three summary flags, which overlap with each other and with the element types.
+For the manuscript the testing is therefore split:
+
+* **Primary outcome**: `mobile_strict`, tested on its own with Tukey-adjusted pairwise odds ratios between the three
+  groups, the adjustment used for every other diet contrast.
+* **Individual element types**: Benjamini-Hochberg within each contrast, across the element types only.
+
+The estimates are model-based probabilities at mean covariates with the participant effect at zero, so the crude
+shares per diet group are exported next to them.
+
+```{r primary mobility}
+# revpairwise: odds ratios of the later group against the earlier one (Vegan / Omnivore), as in the other tables
+strict_tukey <- emmeans(element_fits[["mobile_strict"]], revpairwise ~ diet_group, type = "response",
+                        adjust = "tukey")$contrasts %>%
+  summary(infer = TRUE) %>%
+  as.data.frame() %>%
+  separate(contrast, into = c("group1", "group2"), sep = " / ") %>%
+  transmute(outcome = "mobile_strict", label = "Mobile genetic element", group1, group2,
+            odds_ratio = odds.ratio, conf_low = asymp.LCL, conf_high = asymp.UCL, p_adj = p.value,
+            converged = isTRUE(element_fits[["mobile_strict"]]$sdr$pdHess)) %>%
+  as_tibble()
+strict_tukey
+
+element_types_bh <- element_results %>%
+  filter(group != "Summary") %>%
+  group_by(contrast) %>%
+  mutate(q_types_only = p.adjust(p_value, method = "BH")) %>%
+  ungroup() %>%
+  mutate(converged = map_lgl(outcome, ~ isTRUE(element_fits[[.x]]$sdr$pdHess))) %>%
+  select(outcome, label, group, contrast, odds_ratio, conf_low, conf_high, p_value, q_types_only, converged)
+element_types_bh %>% print(n = Inf)
+
+crude_shares <- contig_data %>%
+  group_by(diet_group) %>%
+  summarise(contigs = n(), samples = n_distinct(sample_id),
+            mobile_strict = sum(mobile_strict), any_annotation = sum(has_mobile_element),
+            plasmid = sum(plasmid), insertion_sequence = sum(insertion_sequence), .groups = "drop") %>%
+  bind_rows(contig_data %>%
+              summarise(contigs = n(), samples = n_distinct(sample_id),
+                        mobile_strict = sum(mobile_strict), any_annotation = sum(has_mobile_element),
+                        plasmid = sum(plasmid), insertion_sequence = sum(insertion_sequence)) %>%
+              mutate(diet_group = "All")) %>%
+  mutate(diet_group = as.character(diet_group),
+         across(c(mobile_strict, any_annotation, plasmid, insertion_sequence), ~ .x / contigs,
+                .names = "share_{.col}"))
+crude_shares
+```
+
+```{r element plot, fig.width = 9, fig.height = 5.5}
+plot_elements <- element_results %>%
+  mutate(label = factor(label, levels = rev(unname(outcomes))),
+         group = factor(group, levels = c("Summary", "Mobile genetic element", "Structural evidence")),
+         diet = str_remove(contrast, " vs Omnivore")) %>%
+  ggplot(aes(x = odds_ratio, y = label, colour = diet, group = diet)) +
+  geom_vline(xintercept = 1, linetype = "dashed", colour = "grey50") +
+  geom_errorbar(aes(xmin = conf_low, xmax = conf_high), width = 0.25, orientation = "y",
+                position = position_dodge(width = 0.6, orientation = "y")) +
+  geom_point(aes(shape = p_adj < 0.05), size = 2.5, position = position_dodge(width = 0.6, orientation = "y")) +
+  scale_colour_manual(values = diet_colors, name = "vs Omnivore") +
+  scale_shape_manual(values = c(`FALSE` = 1, `TRUE` = 16), labels = c("q ≥ 0.05", "q < 0.05"), name = NULL) +
+  scale_x_log10() +
+  facet_grid(group ~ ., scales = "free_y", space = "free_y") +
+  labs(x = "Odds ratio among ARG contigs (log scale)", y = NULL)
+
+plot_elements
+```
+
+
+# Host and assembly adjustment
+
+```{r host adjustment}
+host_outcomes <- c("has_mobile_element", "mobile_strict")
+
+host_adjusted <- map_dfr(host_outcomes, function(outcome) {
+  bind_rows(tidy_diet(fit_diet(outcome)) %>% mutate(model = "Main model"),
+            tidy_diet(fit_diet(outcome, extra = "+ host")) %>% mutate(model = "+ host genus"),
+            tidy_diet(fit_diet(outcome, extra = "+ log(assembly_Mb) + log(N50)")) %>%
+              mutate(model = "+ assembly size and N50"),
+            tidy_diet(fit_diet(outcome, extra = "+ host + log(assembly_Mb) + log(N50)")) %>%
+              mutate(model = "+ host genus + assembly size and N50")) %>%
+    mutate(outcome = outcomes[outcome])
+})
+
+host_adjusted %>% filter(str_detect(contrast, "Vegan")) %>% print(n = Inf)
+```
+
+```{r host plot, fig.width = 10, fig.height = 5}
+host_mobility <- contig_data %>%
+  group_by(host, diet_group) %>%
+  summarise(contigs = n(), mobile = mean(has_mobile_element), mobile_strict = mean(mobile_strict), .groups = "drop") %>%
+  filter(contigs >= 5)
+
+host_order <- contig_data %>% count(host) %>% arrange(n) %>% pull(host)
+
+plot_hosts <- host_mobility %>%
+  mutate(host = factor(host, levels = host_order)) %>%
+  ggplot(aes(x = mobile, y = host, fill = diet_group)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.75, colour = "black", linewidth = 0.2) +
+  scale_fill_manual(values = diet_colors, name = NULL) +
+  scale_x_continuous(labels = scales::label_percent(accuracy = 1), expand = expansion(mult = c(0, 0.05))) +
+  labs(x = "% of ARG contigs with a MAP mobile annotation", y = NULL,
+       subtitle = "Host genera with ≥ 5 ARG contigs per diet group") +
+  theme_bw(base_size = 10) +
+  theme(axis.text.y = element_text(face = "italic"), panel.grid.major.y = element_blank(),
+        panel.grid.minor = element_blank(), legend.position = "bottom",
+        plot.subtitle = element_text(size = 9, colour = "grey30"))
+
+plot_hosts
+```
+
+
+# ARG genes on mobile contigs
+
+```{r mobile genes}
+mobile_genes <- contig_data %>%
+  filter(mobile_strict) %>%
+  separate_longer_delim(ARG_combination, delim = " + ") %>%
+  count(diet_group, ARG_gene = ARG_combination, name = "copies") %>%
+  group_by(diet_group) %>%
+  mutate(percentage = copies / sum(copies)) %>%
+  ungroup() %>%
+  arrange(diet_group, desc(copies))
+
+mobile_genes %>% group_by(diet_group) %>% slice_head(n = 8) %>% print(n = Inf)
+```
+
+
+# Save
+
+```{r save}
+write_tsv(element_results, file.path(table_dir, "mobility_element_types_diet.tsv"))
+write_tsv(element_estimates, file.path(table_dir, "mobility_element_estimates.tsv"))
+write_tsv(host_adjusted, file.path(table_dir, "mobility_host_adjusted.tsv"))
+write_tsv(mobile_genes, file.path(table_dir, "mobility_genes_by_diet.tsv"))
+write_tsv(strict_tukey, file.path(table_dir, "mobility_strict_tukey.tsv"))
+write_tsv(element_types_bh, file.path(table_dir, "mobility_element_types_bh.tsv"))
+write_tsv(crude_shares, file.path(table_dir, "mobility_crude_shares.tsv"))
+
+ggsave(file.path(plot_dir, "Mobility_element_types_by_diet.png"), plot_elements, width = 9, height = 5.5, dpi = 600, bg = "white")
+ggsave(file.path(plot_dir, "Mobility_by_host_and_diet.png"), plot_hosts, width = 10, height = 5, dpi = 600, bg = "white")
+```
