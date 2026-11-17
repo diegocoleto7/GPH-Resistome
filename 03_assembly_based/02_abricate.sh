@@ -1,10 +1,4 @@
 #!/bin/bash
-#SBATCH --job-name=abricate
-#SBATCH --cpus-per-task=30
-#SBATCH -t 150:00:00
-#SBATCH --output=logs/%x_%j.log
-#SBATCH --error=logs/%x_%j.log
-
 # Uso: sbatch 02_abricate.sh <assembly_dir> <out_dir>
 #   assembly_dir: <muestra>.contigs.fa
 #   out_dir:      <db>/<muestra>.abricate_<db>.out para resfinder, vfdb y plasmidfinder
