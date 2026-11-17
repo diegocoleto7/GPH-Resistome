@@ -1,18 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=metaphlan
-#SBATCH --cpus-per-task=12
-#SBATCH --mem=24G
-#SBATCH -t 24:00:00
-#SBATCH --output=logs/%x_%j.log
-#SBATCH --error=logs/%x_%j.log
-
 # Uso: sbatch --array=0-<N-1> 01_metaphlan.sh <hostclean_dir> <out_dir> <metaphlan_db_dir>
 #   hostclean_dir:    <muestra>_hostclean_R1.fastq.gz / _R2.fastq.gz (salida de 01_preprocessing/03_host_removal.sh)
 #   out_dir:          <muestra>_profile.tsv y <muestra>.map.bz2
 #   metaphlan_db_dir: carpeta de bases de datos de MetaPhlAn que contiene el indice
-#   --array: una tarea por muestra, de 0 a N-1 (N = numero de ficheros *_hostclean_R1.fastq.gz)
-# Perfil de abundancia relativa con MetaPhlAn 4.2.2 sobre el indice mpa_vJan25_CHOCOPhlAnSGB_202503 (GTDB).
-# Si el perfil de una muestra ya existe, la tarea se salta: el array se puede relanzar.
 
 set -euo pipefail
 
