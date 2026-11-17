@@ -1,11 +1,4 @@
 #!/bin/bash
-#SBATCH --job-name=bowtie2_resfinder
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=120G
-#SBATCH -t 150:00:00
-#SBATCH --output=logs/%x_%j.log
-#SBATCH --error=logs/%x_%j.log
-
 # Uso: sbatch 01_bowtie2_resfinder.sh <hostclean_dir> <resfinder_bt2_index> <out_dir>
 #   hostclean_dir:       <muestra>_hostclean_R1.fastq.gz / _R2.fastq.gz
 #   resfinder_bt2_index: prefijo del índice bowtie2 de ResFinder (all.fsa, sin clusterizar)
