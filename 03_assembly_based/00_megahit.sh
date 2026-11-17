@@ -1,17 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=megahit
-#SBATCH --cpus-per-task=40
-#SBATCH -t 200:00:00
-#SBATCH --output=logs/%x_%j.log
-#SBATCH --error=logs/%x_%j.log
 
 # Uso: sbatch 00_megahit.sh <hostclean_dir> <out_dir>
 #   hostclean_dir: <muestra>_hostclean_R1.fastq.gz / _R2.fastq.gz (salida de 01_preprocessing/03_host_removal.sh)
 #   out_dir:       <muestra>/final.contigs.fa (MEGAHIT) y <muestra>.contigs.fa en la raiz
-#
-# MEGAHIT escribe cada ensamblado en su propia carpeta como final.contigs.fa, mientras que los
-# pasos siguientes (01_assembly_stats.sh en adelante) esperan <out_dir>/<muestra>.contigs.fa.
-# El bucle final hace ese puente con enlaces simbolicos; si prefieres copiarlos, cambia ln -sf por cp.
 
 set -euo pipefail
 
