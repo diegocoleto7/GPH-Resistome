@@ -1,10 +1,4 @@
 #!/bin/bash
-#SBATCH --job-name=assembly_stats
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=8G
-#SBATCH -t 04:00:00
-#SBATCH --output=logs/%x_%j.log
-#SBATCH --error=logs/%x_%j.log
 
 # Uso: sbatch 01_assembly_stats.sh <assembly_dir> <out_dir>
 #   assembly_dir: <muestra>.contigs.fa (MEGAHIT)
