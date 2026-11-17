@@ -1,16 +1,9 @@
 #!/bin/bash
-#SBATCH --job-name=kraken2
-#SBATCH --cpus-per-task=24
-#SBATCH --mem=250G
-#SBATCH -t 48:00:00
-#SBATCH --output=logs/%x_%j.log
-#SBATCH --error=logs/%x_%j.log
 
 # Uso: sbatch 05_kraken2.sh <arg_contigs_dir> <kraken2_db> <out_dir>
 #   arg_contigs_dir: <muestra>.ARG_contigs.fa (salida de 04_extract_arg_contigs.sh)
 #   kraken2_db:      base de datos de Kraken2 (PlusPFP)
 #   out_dir:         output/<muestra>.kraken.tsv y report/<muestra>.report.txt
-# Confidence por defecto (0).
 
 set -euo pipefail
 
