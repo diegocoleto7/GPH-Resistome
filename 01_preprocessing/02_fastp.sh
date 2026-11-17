@@ -1,16 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=fastp
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=16G
-#SBATCH -t 48:00:00
-#SBATCH --output=logs/%x_%j.log
-#SBATCH --error=logs/%x_%j.log
-
 # Uso: sbatch 02_fastp.sh <in_dir> <out_dir> <report_dir>
 #   in_dir:     <muestra>_1.fq.gz / <muestra>_2.fq.gz
 #   out_dir:    <muestra>_filtered_R1.fastq.gz / _R2.fastq.gz
 #   report_dir: <muestra>_fastp.json / <muestra>.html
-# Recorte en 5' y 3' con ventana deslizante (Q20), filtro de longitud mínima 50 pb.
 
 set -euo pipefail
 
