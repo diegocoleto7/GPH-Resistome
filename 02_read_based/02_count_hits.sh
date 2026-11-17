@@ -1,21 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=count_hits
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=8G
-#SBATCH -t 48:00:00
-#SBATCH --output=logs/%x_%j.log
-#SBATCH --error=logs/%x_%j.log
-
 # Uso: sbatch 02_count_hits.sh <bam_dir> <out_dir> [sample]
 #   bam_dir: <muestra>.bam (salida de 01_bowtie2_resfinder.sh)
 #   out_dir: hits_matrix.tsv (genes × muestras), library_sizes.tsv, per_sample/<muestra>.counts.tsv
 #   sample (opcional): procesa solo esa muestra
-#
-# Se excluyen secondary (0x100) y supplementary (0x800): -F 2304.
-# Sobre los registros primarios (mapped + unmapped, R1 y R2):
-#   - library_size = nº de registros primarios
-#   - hits = registros mapeados (sin 0x4), contando cada (QNAME, gen) una vez
-#     -> R1 y R2 en el mismo gen = 1 hit; en genes distintos = 1 hit a cada gen
 
 set -euo pipefail
 
