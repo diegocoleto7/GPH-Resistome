@@ -1,15 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=viromeqc
-#SBATCH --cpus-per-task=40
-#SBATCH --mem=120G
-#SBATCH -t 150:00:00
-#SBATCH --output=logs/%x_%j.log
-#SBATCH --error=logs/%x_%j.log
-
 # Uso: sbatch 03_viromeqc.sh <hostclean_dir> <out_dir>
 #   hostclean_dir: <muestra>_hostclean_R1.fastq.gz
 #   out_dir:       report_<muestra>.txt
-# ViromeQC sobre R1, sin filtros de longitud ni calidad (las lecturas ya vienen de fastp).
 
 set -euo pipefail
 
