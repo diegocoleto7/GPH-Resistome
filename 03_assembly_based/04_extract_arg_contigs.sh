@@ -5,9 +5,6 @@
 
 set -euo pipefail
 
-# ============================================================
-# Directorios
-# ============================================================
 
 ABRICATE_DIR="${1:?Uso: bash 04_extract_arg_contigs.sh <abricate_resfinder_dir> <out_dir>}"
 
@@ -21,30 +18,10 @@ mkdir -p "$IDS_DIR"
 
 set +u; eval "$(conda shell.bash hook)"; conda activate fungigut; set -u
 
-
-# ============================================================
-# Comprobar dependencias
-# ============================================================
-
-if ! command -v seqkit >/dev/null 2>&1; then
-    echo "ERROR: seqkit no está disponible en el PATH." >&2
-    exit 1
-fi
-
-
-# ============================================================
-# Archivo resumen del filtrado
-# ============================================================
-
 SUMMARY="${OUTPUT_DIR}/ARG_contig_extraction_summary.tsv"
 
 printf "sample\tassembly\tabricate_hits\tunique_ARG_contigs\tmatched_contigs\toutput_fasta\n" \
     > "$SUMMARY"
-
-
-# ============================================================
-# Procesar cada archivo de ABRicate
-# ============================================================
 
 shopt -s nullglob
 
@@ -69,16 +46,6 @@ for report in "${reports[@]}"; do
 
     echo "Procesando ${sample}..."
 
-
-    # --------------------------------------------------------
-    # Número total de hits de ABRicate
-    #
-    # Un mismo contig puede aparecer varias veces si contiene:
-    #   - varios ARG;
-    #   - varios hits del mismo ARG;
-    #   - hits parcialmente solapantes.
-    # --------------------------------------------------------
-
     n_hits=$(
         awk -F '\t' '
             !/^#/ && NF >= 2 {
@@ -91,12 +58,6 @@ for report in "${reports[@]}"; do
     )
 
 
-    # --------------------------------------------------------
-    # Extraer IDs únicos de contigs con ARG
-    #
-    # Columna 2 de ABRicate = SEQUENCE
-    # --------------------------------------------------------
-
     awk -F '\t' '
         !/^#/ && NF >= 2 && $2 != "" {
             print $2
@@ -108,11 +69,6 @@ for report in "${reports[@]}"; do
 
     n_unique=$(wc -l < "$ids_file")
 
-
-    # --------------------------------------------------------
-    # Si no hay hits, no existe un assembly en la columna FILE
-    # y no hay contigs que extraer.
-    # --------------------------------------------------------
 
     if (( n_unique == 0 )); then
 
@@ -129,12 +85,6 @@ for report in "${reports[@]}"; do
     fi
 
 
-    # --------------------------------------------------------
-    # Recuperar la ruta del assembly desde la columna #FILE
-    #
-    # Todos los hits de un informe individual deberían proceder
-    # del mismo archivo.
-    # --------------------------------------------------------
 
     mapfile -t assembly_paths < <(
         awk -F '\t' '
@@ -157,10 +107,6 @@ for report in "${reports[@]}"; do
     assembly="${assembly_paths[0]}"
 
 
-    # --------------------------------------------------------
-    # Comprobar que el assembly existe
-    # --------------------------------------------------------
-
     if [[ ! -f "$assembly" ]]; then
         echo "ERROR: no se encuentra el assembly indicado por ABRicate:" >&2
         echo "       ${assembly}" >&2
@@ -169,15 +115,6 @@ for report in "${reports[@]}"; do
     fi
 
 
-    # --------------------------------------------------------
-    # Contar los IDs encontrados en el assembly
-    #
-    # seqkit grep usa por defecto el ID de la secuencia:
-    #
-    # >k141_104967 flag=1 multi=...
-    #  \_________/
-    #       ID
-    # --------------------------------------------------------
 
     n_matched=$(
         seqkit grep \
@@ -187,9 +124,6 @@ for report in "${reports[@]}"; do
     )
 
 
-    # --------------------------------------------------------
-    # Extraer los contigs completos
-    # --------------------------------------------------------
 
     seqkit grep \
         --pattern-file "$ids_file" \
@@ -197,9 +131,6 @@ for report in "${reports[@]}"; do
         --out-file "$output_fasta"
 
 
-    # --------------------------------------------------------
-    # Control de consistencia
-    # --------------------------------------------------------
 
     if (( n_matched != n_unique )); then
 
@@ -233,9 +164,6 @@ for report in "${reports[@]}"; do
     fi
 
 
-    # --------------------------------------------------------
-    # Añadir al resumen
-    # --------------------------------------------------------
 
     printf "%s\t%s\t%s\t%s\t%s\t%s\n" \
         "$sample" \
