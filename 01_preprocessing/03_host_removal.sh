@@ -1,16 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=host_removal
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=16G
-#SBATCH -t 72:00:00
-#SBATCH --output=logs/%x_%j.log
-#SBATCH --error=logs/%x_%j.log
-
 # Uso: sbatch 03_host_removal.sh <in_dir> <out_dir> <grch38_bt2_index>
 #   in_dir:           <muestra>_filtered_R1.fastq.gz / _R2.fastq.gz (salida de 02_fastp.sh)
 #   out_dir:          <muestra>_hostclean_R1.fastq.gz / _R2.fastq.gz + log/<muestra>_hostclean.log
-#   grch38_bt2_index: prefijo del índice bowtie2 de GRCh38
-# Se conservan los pares que no alinean de forma concordante con el genoma humano.
 
 set -euo pipefail
 
