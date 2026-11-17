@@ -1,15 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=taxonkit
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=16G
-#SBATCH -t 02:00:00
-#SBATCH --output=logs/%x_%j.log
-#SBATCH --error=logs/%x_%j.log
 
 # Uso: sbatch 07_taxonkit.sh <kraken2_all_samples.tsv> <out_dir>
 #   kraken2_all_samples.tsv: salida de 06_merge_kraken2.py
-#   out_dir: kraken2_unique_taxids.txt y kraken2_taxonomy.tsv (taxid, domain..species; NA si falta el rango)
-# Usa el taxdump de NCBI en el directorio por defecto de taxonkit.
+#   out_dir: kraken2_unique_taxids.txt y kraken2_taxonomy.tsv 
 
 set -euo pipefail
 
