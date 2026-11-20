@@ -1,5 +1,4 @@
 #!/bin/bash
-# bash 01_merge_lanes.sh <raw_dir> <out_dir>
 
 set -euo pipefail
 
