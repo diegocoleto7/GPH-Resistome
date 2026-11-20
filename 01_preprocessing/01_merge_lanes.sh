@@ -1,12 +1,10 @@
 #!/bin/bash
-# Uso: bash 01_merge_lanes.sh <raw_dir> <out_dir>
-#   raw_dir: una carpeta por muestra con sus *_1.fq.gz / *_2.fq.gz (una o varias lanes)
-#   out_dir: <muestra>_1.fq.gz / <muestra>_2.fq.gz (enlace si hay una lane, concatenación si hay varias)
+# bash 01_merge_lanes.sh <raw_dir> <out_dir>
 
 set -euo pipefail
 
-RAW_DIR="${1:?Uso: bash 01_merge_lanes.sh <raw_dir> <out_dir>}"
-OUT_DIR="${2:?Uso: bash 01_merge_lanes.sh <raw_dir> <out_dir>}"
+RAW_DIR="${1:?bash 01_merge_lanes.sh <raw_dir> <out_dir>}"
+OUT_DIR="${2:?bash 01_merge_lanes.sh <raw_dir> <out_dir>}"
 mkdir -p "${OUT_DIR}"
 
 for dir in "${RAW_DIR}"/*/; do
