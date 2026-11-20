@@ -1,17 +1,11 @@
 #!/bin/bash
-# Uso: sbatch 03_host_removal.sh <in_dir> <out_dir> <grch38_bt2_index>
-#   in_dir:           <muestra>_filtered_R1.fastq.gz / _R2.fastq.gz (salida de 02_fastp.sh)
-#   out_dir:          <muestra>_hostclean_R1.fastq.gz / _R2.fastq.gz + log/<muestra>_hostclean.log
-
 set -euo pipefail
 
-IN_DIR="${1:?Uso: sbatch 03_host_removal.sh <in_dir> <out_dir> <grch38_bt2_index>}"
-OUT_DIR="${2:?Uso: sbatch 03_host_removal.sh <in_dir> <out_dir> <grch38_bt2_index>}"
-INDEX="${3:?Uso: sbatch 03_host_removal.sh <in_dir> <out_dir> <grch38_bt2_index>}"
-T="${SLURM_CPUS_PER_TASK:-16}"
+IN_DIR="${1}"
+OUT_DIR="${2}"
+INDEX="${3}"
+T=16
 mkdir -p "${OUT_DIR}/log"
-
-set +u; eval "$(conda shell.bash hook)"; conda activate fungigut; set -u
 
 for R1 in "${IN_DIR}"/*_filtered_R1.fastq.gz; do
     id=$(basename "${R1}" _filtered_R1.fastq.gz)
