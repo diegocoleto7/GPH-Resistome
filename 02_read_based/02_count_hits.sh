@@ -1,32 +1,17 @@
 #!/bin/bash
-# Uso: sbatch 02_count_hits.sh <bam_dir> <out_dir> [sample]
-#   bam_dir: <muestra>.bam (salida de 01_bowtie2_resfinder.sh)
-#   out_dir: hits_matrix.tsv (genes × muestras), library_sizes.tsv, per_sample/<muestra>.counts.tsv
-#   sample (opcional): procesa solo esa muestra
-
 set -euo pipefail
 
-BAM_DIR="${1:?Uso: sbatch 02_count_hits.sh <bam_dir> <out_dir> [sample]}"
-OUT_DIR="${2:?Uso: sbatch 02_count_hits.sh <bam_dir> <out_dir> [sample]}"
-TEST_SAMPLE="${3:-}"
+BAM_DIR="${1}"
+OUT_DIR="${2}"
 PER_SAMPLE_DIR="${OUT_DIR}/per_sample"
 STATS_FILE="${OUT_DIR}/library_sizes.tsv"
 MATRIX_FILE="${OUT_DIR}/hits_matrix.tsv"
-THREADS="${SLURM_CPUS_PER_TASK:-4}"
+THREADS=4
 EXCLUDE_FLAGS=2304
 mkdir -p "${PER_SAMPLE_DIR}"
 
-set +u; eval "$(conda shell.bash hook)"; conda activate samtools_env; set -u
-
 shopt -s nullglob
 FILES=( "${BAM_DIR}"/*.bam )
-if [[ -n "${TEST_SAMPLE}" ]]; then
-    FILES=( "${BAM_DIR}/${TEST_SAMPLE}.bam" )
-fi
-if [[ ${#FILES[@]} -eq 0 || ! -f "${FILES[0]}" ]]; then
-    echo "ERROR: no hay BAMs en ${BAM_DIR}" >&2
-    exit 1
-fi
 
 echo -e "sample\tlibrary_size\tmapped_primary\ttotal_hits\tdetected_genes" > "${STATS_FILE}"
 
