@@ -3,11 +3,13 @@ set -euo pipefail
 
 BAM_DIR="${1}"
 OUT_DIR="${2}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 PER_SAMPLE_DIR="${OUT_DIR}/per_sample"
 STATS_FILE="${OUT_DIR}/library_sizes.tsv"
 MATRIX_FILE="${OUT_DIR}/hits_matrix.tsv"
-THREADS=4
-EXCLUDE_FLAGS=2304
+
 mkdir -p "${PER_SAMPLE_DIR}"
 
 shopt -s nullglob
