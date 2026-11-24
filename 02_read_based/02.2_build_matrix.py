@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 
-# python3 04_build_matrix.py <per_sample_dir> <matrix_file>
-
 import os
 import sys
 import glob
