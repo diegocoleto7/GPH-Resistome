@@ -1,3 +1,5 @@
+#!/bin/bash
+
 set -euo pipefail
 
 INPUT_DIR="${1}"
