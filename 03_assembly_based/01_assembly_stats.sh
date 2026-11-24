@@ -1,18 +1,12 @@
 #!/bin/bash
-
-# Uso: sbatch 01_assembly_stats.sh <assembly_dir> <out_dir>
-#   assembly_dir: <muestra>.contigs.fa (MEGAHIT)
-#   out_dir:      assembly_stats.tsv (seqkit stats -a) y contig_headers.tsv (muestra \t cabecera del contig)
-
 set -euo pipefail
 
-ASM_DIR="${1:?Uso: sbatch 01_assembly_stats.sh <assembly_dir> <out_dir>}"
-OUT_DIR="${2:?Uso: sbatch 01_assembly_stats.sh <assembly_dir> <out_dir>}"
+ASM_DIR="${1}"
+OUT_DIR="${2}"
 mkdir -p "${OUT_DIR}"
 
-set +u; eval "$(conda shell.bash hook)"; conda activate fungigut; set -u
 
-seqkit stats -a -T -j "${SLURM_CPUS_PER_TASK:-4}" "${ASM_DIR}"/*.contigs.fa > "${OUT_DIR}/assembly_stats.tsv"
+seqkit stats -a -T -j 4 "${ASM_DIR}"/*.contigs.fa > "${OUT_DIR}/assembly_stats.tsv"
 
 for f in "${ASM_DIR}"/*.contigs.fa; do
     s=$(basename "${f}" .contigs.fa)
