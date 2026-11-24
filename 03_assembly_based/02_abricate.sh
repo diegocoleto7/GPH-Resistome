@@ -1,15 +1,10 @@
 #!/bin/bash
-# Uso: sbatch 02_abricate.sh <assembly_dir> <out_dir>
-#   assembly_dir: <muestra>.contigs.fa
-#   out_dir:      <db>/<muestra>.abricate_<db>.out para resfinder, vfdb y plasmidfinder
-
 set -euo pipefail
 
-DATA_DIR="${1:?Uso: sbatch 02_abricate.sh <assembly_dir> <out_dir>}"
-OUT_DIR="${2:?Uso: sbatch 02_abricate.sh <assembly_dir> <out_dir>}"
+DATA_DIR="${1}"
+OUT_DIR="${2}"
 DBS=( resfinder vfdb plasmidfinder )
 
-set +u; eval "$(conda shell.bash hook)"; conda activate abricate; set -u
 
 for db in "${DBS[@]}"; do
     mkdir -p "${OUT_DIR}/${db}"
