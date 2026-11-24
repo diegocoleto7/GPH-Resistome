@@ -1,18 +1,11 @@
 #!/bin/bash
 
-# Uso: sbatch 00_megahit.sh <hostclean_dir> <out_dir>
-#   hostclean_dir: <muestra>_hostclean_R1.fastq.gz / _R2.fastq.gz (salida de 01_preprocessing/03_host_removal.sh)
-#   out_dir:       <muestra>/final.contigs.fa (MEGAHIT) y <muestra>.contigs.fa en la raiz
-
 set -euo pipefail
 
-IN_DIR="${1:?Uso: sbatch 00_megahit.sh <hostclean_dir> <out_dir>}"
-OUT_DIR="${2:?Uso: sbatch 00_megahit.sh <hostclean_dir> <out_dir>}"
-T="${SLURM_CPUS_PER_TASK:-40}"
+IN_DIR="${1}"
+OUT_DIR="${2}"
+T=40
 mkdir -p "${OUT_DIR}"
-
-module load python/python-3.9-intelr
-module load megahit/1.2.9
 
 for R1 in "${IN_DIR}"/*_hostclean_R1.fastq.gz; do
     sample=$(basename "${R1}" _hostclean_R1.fastq.gz)
