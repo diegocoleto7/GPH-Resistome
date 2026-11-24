@@ -1,18 +1,11 @@
 #!/bin/bash
 
-# Uso: sbatch 05_kraken2.sh <arg_contigs_dir> <kraken2_db> <out_dir>
-#   arg_contigs_dir: <muestra>.ARG_contigs.fa (salida de 04_extract_arg_contigs.sh)
-#   kraken2_db:      base de datos de Kraken2 (PlusPFP)
-#   out_dir:         output/<muestra>.kraken.tsv y report/<muestra>.report.txt
-
 set -euo pipefail
 
-DATA_DIR="${1:?Uso: sbatch 05_kraken2.sh <arg_contigs_dir> <kraken2_db> <out_dir>}"
-DB="${2:?Uso: sbatch 05_kraken2.sh <arg_contigs_dir> <kraken2_db> <out_dir>}"
-OUT_DIR="${3:?Uso: sbatch 05_kraken2.sh <arg_contigs_dir> <kraken2_db> <out_dir>}"
+DATA_DIR="${1}"
+DB="${2}"
+OUT_DIR="${3}"
 mkdir -p "${OUT_DIR}/output" "${OUT_DIR}/report"
-
-set +u; eval "$(conda shell.bash hook)"; conda activate kraken2; set -u
 
 for asb in "${DATA_DIR}"/*.ARG_contigs.fa; do
     sample=$(basename "${asb}" .ARG_contigs.fa)
